@@ -15,14 +15,13 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-      - name: Create Gradle Wrapper
-        run: gradle wrapper
       - name: Build with Gradle
         run: |
           chmod +x gradlew || true
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug || gradle assembleDebug
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: |
+            **/build/outputs/apk/debug/*.apk
