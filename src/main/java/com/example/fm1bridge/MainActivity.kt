@@ -1065,7 +1065,33 @@ class MainActivity : Activity() {
             if ((tickCount + offTicks) % trigTicks == 0L) triggerSync()
             tickCount++
         }
+name: Build Android APK
 
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Build with Gradle
+        run: |
+          chmod +x gradlew || true
+          ./gradlew assembleDebug || gradle assembleDebug
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: |
+            **/build/outputs/apk/debug/*.apk
         if (now - lastUiNs > 300_000_000L) {
             lastUiNs = now
             val bpmNow = followBpm
