@@ -24,4 +24,4 @@ jobs:
         with:
           name: debug-apk
           path: |
-            **/build/outputs/apk/debug/*.apk
+            **/build/outputs/apk/debug/**.apk
