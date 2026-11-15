@@ -29,12 +29,12 @@ class WaveformView(context: Context) : View(context) {
     private var dragging = 0 // 0 = none, 1 = start handle, 2 = end handle
 
     init {
-        wavePaint.color = Color.parseColor("#3F51B5")
+        wavePaint.color = Color.parseColor("#8FB0FF")
         wavePaint.strokeWidth = 2f
         shadePaint.color = Color.parseColor("#33FF9800")
         handlePaint.color = Color.parseColor("#E65100")
         handlePaint.strokeWidth = 6f
-        midPaint.color = Color.LTGRAY
+        midPaint.color = Color.parseColor("#555555")
         midPaint.strokeWidth = 1f
     }
 
