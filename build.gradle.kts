@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.fm1bridge"
         minSdk = 23
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.3"
+        versionCode = 4
+        versionName = "0.4"
     }
 
     // Same signing key for every build, so a new APK can be installed over the old one
