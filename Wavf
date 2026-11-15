@@ -1,0 +1,96 @@
+package com.example.fm1bridge
+
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.view.MotionEvent
+import android.view.View
+import kotlin.math.abs
+
+class WaveformView(context: Context) : View(context) {
+
+    // Peak values 0..1, one per horizontal bin
+    var peaks: FloatArray = FloatArray(0)
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    // Selection as a fraction of the whole sample, 0..1
+    var selStart = 0f
+    var selEnd = 1f
+    var onSelection: ((Float, Float) -> Unit)? = null
+
+    private val wavePaint = Paint()
+    private val shadePaint = Paint()
+    private val handlePaint = Paint()
+    private val midPaint = Paint()
+    private var dragging = 0 // 0 = none, 1 = start handle, 2 = end handle
+
+    init {
+        wavePaint.color = Color.parseColor("#3F51B5")
+        wavePaint.strokeWidth = 2f
+        shadePaint.color = Color.parseColor("#33FF9800")
+        handlePaint.color = Color.parseColor("#E65100")
+        handlePaint.strokeWidth = 6f
+        midPaint.color = Color.LTGRAY
+        midPaint.strokeWidth = 1f
+    }
+
+    fun setSelection(s: Float, e: Float) {
+        selStart = s
+        selEnd = e
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val mid = h / 2f
+        canvas.drawLine(0f, mid, w, mid, midPaint)
+        if (peaks.isNotEmpty() && width > 0) {
+            for (x in 0 until width) {
+                val idx = (x.toLong() * peaks.size / width).toInt().coerceIn(0, peaks.size - 1)
+                val a = peaks[idx] * (mid - 4f)
+                canvas.drawLine(x.toFloat(), mid - a, x.toFloat(), mid + a, wavePaint)
+            }
+        }
+        val sx = selStart * w
+        val ex = selEnd * w
+        canvas.drawRect(sx, 0f, ex, h, shadePaint)
+        canvas.drawLine(sx, 0f, sx, h, handlePaint)
+        canvas.drawLine(ex, 0f, ex, h, handlePaint)
+    }
+
+    override fun onTouchEvent(ev: MotionEvent): Boolean {
+        val w = width.toFloat()
+        if (w <= 0f) return false
+        val f = (ev.x / w).coerceIn(0f, 1f)
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                parent?.requestDisallowInterceptTouchEvent(true)
+                dragging = if (abs(f - selStart) <= abs(f - selEnd)) 1 else 2
+                updateSelection(f)
+            }
+            MotionEvent.ACTION_MOVE -> updateSelection(f)
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                dragging = 0
+                parent?.requestDisallowInterceptTouchEvent(false)
+            }
+        }
+        return true
+    }
+
+    private fun updateSelection(f: Float) {
+        val minGap = 0.002f
+        if (dragging == 1) {
+            selStart = f.coerceAtMost(selEnd - minGap).coerceAtLeast(0f)
+        } else if (dragging == 2) {
+            selEnd = f.coerceAtLeast(selStart + minGap).coerceAtMost(1f)
+        }
+        invalidate()
+        onSelection?.invoke(selStart, selEnd)
+    }
+}
