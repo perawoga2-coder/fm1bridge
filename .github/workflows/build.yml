@@ -25,7 +25,7 @@ jobs:
           gradle-version: 8.7
 
       - name: Clean previous build artifacts
-        run: ./gradlew clean
+        run: gradlew clean
 
       - name: Use the fixed signing key
         env:
