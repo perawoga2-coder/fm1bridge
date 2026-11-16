@@ -1,6 +1,7 @@
 package com.example.fm1bridge
 
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioTrack
 import kotlin.math.PI
@@ -268,6 +269,7 @@ class MixerEngine(private val rate: Int, private val tracks: Array<TrackState>) 
     @Volatile var masterPeak = 0f
     @Volatile var beatPos = 0.0
     @Volatile var startNs = 0L
+    @Volatile var outputDevice: AudioDeviceInfo? = null
     @Volatile private var gen = 0
     private val phases = DoubleArray(tracks.size)
 
@@ -320,9 +322,18 @@ class MixerEngine(private val rate: Int, private val tracks: Array<TrackState>) 
             return
         }
         val out = ShortArray(chunk * 2)
+        var applied: AudioDeviceInfo? = null
         try {
             at.play()
             while (playing && g == gen) {
+                val want = outputDevice
+                if (want !== applied) {
+                    try {
+                        at.setPreferredDevice(want)
+                    } catch (e: Exception) {
+                    }
+                    applied = want
+                }
                 render(out, chunk)
                 at.write(out, 0, out.size)
             }
