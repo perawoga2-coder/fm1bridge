@@ -43,7 +43,6 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.SeekBar
-import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import java.io.ByteArrayOutputStream
@@ -53,6 +52,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.locks.LockSupport
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.ln
 import kotlin.math.roundToInt
 
@@ -66,6 +66,18 @@ class MainActivity : Activity() {
         const val TRACKS = 4
     }
 
+    // A copy of a track's sound and loop settings, used by Undo
+    private class Snap(
+        val data: ShortArray?,
+        val file: File?,
+        val beats: Int,
+        val fit: Boolean,
+        val rs: Float,
+        val re: Float,
+        val speed: Float,
+        val rev: Boolean
+    )
+
     // Widgets of one track card
     private class TrackUi {
         lateinit var name: TextView
@@ -76,9 +88,13 @@ class MainActivity : Activity() {
         lateinit var muteBtn: Button
         lateinit var soloBtn: Button
         lateinit var modeBtn: Button
+        lateinit var revBtn: Button
+        lateinit var speedText: TextView
+        lateinit var speedBar: SeekBar
         val beatBtns = arrayOfNulls<Button>(5)
         var file: File? = null
         var srcLabel = "Internal mic"
+        var snap: Snap? = null
     }
 
     // ---------------- shared state ----------------
@@ -114,7 +130,12 @@ class MainActivity : Activity() {
     @Volatile private var clockDelayMs = 0
     @Volatile private var clockGen = 0
 
-    // Recording input
+    // Effects tab
+    private lateinit var fxList: LinearLayout
+    private val fxTrackBtns = arrayOfNulls<Button>(TRACKS)
+    private var fxTrack = 0
+
+    // Recording
     private var inputDevs: List<AudioDeviceInfo> = emptyList()
     private lateinit var gainText: TextView
     private lateinit var recMeter: MeterView
@@ -124,6 +145,9 @@ class MainActivity : Activity() {
     @Volatile private var recTrack = -1
     @Volatile private var softGain = 1f
     @Volatile private var autoOn = true
+    @Volatile private var syncRecOn = false
+    @Volatile private var overdubOn = false
+    @Volatile private var recLatencyMs = 0
     private var lastMeterNs = 0L
     private var pendingTrack = -1
 
@@ -173,7 +197,7 @@ class MainActivity : Activity() {
         root.setBackgroundColor(Color.parseColor("#0E0E0E"))
 
         val tabBar = hbox()
-        val tabNames = listOf("🎛 Tracks", "📚 Library", "✂ Edit", "🥁 Pads")
+        val tabNames = listOf("🎛 Tracks", "🎚 FX", "📚 Library", "✂ Edit", "🥁 Pads")
         tabNames.forEachIndexed { i, n ->
             tabBar.addView(btn(n) { showTab(i) }, weight())
         }
@@ -191,6 +215,7 @@ class MainActivity : Activity() {
         val content = FrameLayout(this)
         tabViews = listOf(
             scroll(buildTracks()),
+            scroll(buildFx()),
             scroll(buildLibrary()),
             scroll(buildEdit()),
             scroll(buildPads())
@@ -245,8 +270,9 @@ class MainActivity : Activity() {
             scanInputs()
             for (k in 0 until TRACKS) refreshTrackUi(k)
         }
-        if (i == 1) refreshLibrary()
-        if (i == 2) refreshEditor()
+        if (i == 1) buildFxRows()
+        if (i == 2) refreshLibrary()
+        if (i == 3) refreshEditor()
     }
 
     // ---------------- small UI helpers ----------------
@@ -327,7 +353,7 @@ class MainActivity : Activity() {
     private fun seek(max: Int, value: Int, onChange: (Int) -> Unit): SeekBar {
         val s = SeekBar(this)
         s.max = max
-        s.progress = value
+        s.progress = value.coerceIn(0, max)
         s.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
                 if (fromUser) onChange(p)
@@ -523,6 +549,25 @@ class MainActivity : Activity() {
         auto.setOnCheckedChangeListener { _, checked -> autoOn = checked }
         c.addView(auto)
 
+        val syncCb = CheckBox(this)
+        syncCb.text = "Sync record: start at the next loop start, stop after the loop length"
+        syncCb.setTextColor(Color.WHITE)
+        syncCb.setOnCheckedChangeListener { _, checked -> syncRecOn = checked }
+        c.addView(syncCb)
+
+        val odCb = CheckBox(this)
+        odCb.text = "Overdub: mix the new recording with the sound already on the track"
+        odCb.setTextColor(Color.WHITE)
+        odCb.setOnCheckedChangeListener { _, checked -> overdubOn = checked }
+        c.addView(odCb)
+
+        val latText = label("Recording latency compensation: 0 ms", 12f)
+        c.addView(latText)
+        c.addView(seek(300, 0) {
+            recLatencyMs = it
+            latText.text = "Recording latency compensation: $it ms"
+        })
+
         recMeter = MeterView(this)
         c.addView(recMeter, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(16)))
 
@@ -532,7 +577,7 @@ class MainActivity : Activity() {
         clipWarn.visibility = View.GONE
         c.addView(clipWarn)
 
-        recStatus = label("Press ● Rec on a track to record into it.", 13f)
+        recStatus = label("Press ● Rec on any track to record into it.", 13f)
         c.addView(recStatus)
         return c
     }
@@ -576,15 +621,27 @@ class MainActivity : Activity() {
         stepLp.bottomMargin = dp(6)
         c.addView(ui.steps, stepLp)
 
-        // Actions
-        val acts = hbox()
+        // Actions, row 1
+        val a1 = hbox()
         ui.recBtn = btn("● Rec") { onRecButton(i) }
-        acts.addView(ui.recBtn, weight())
-        acts.addView(btn("📂 Load") { loadDialog(i) }, weight())
-        acts.addView(btn("🎤 Input") { sourceDialog(i) }, weight())
-        acts.addView(btn("✂ Edit") { editTrack(i) }, weight())
-        acts.addView(btn("✕ Clear") { clearTrack(i) }, weight())
-        c.addView(acts)
+        a1.addView(ui.recBtn, weight())
+        a1.addView(btn("📂 Load") { loadDialog(i) }, weight())
+        a1.addView(btn("🎤 Input") { sourceDialog(i) }, weight())
+        a1.addView(btn("✕ Clear") { clearTrack(i) }, weight())
+        c.addView(a1)
+
+        // Actions, row 2
+        val a2 = hbox()
+        a2.addView(btn("✂ Region") { regionDialog(i) }, weight())
+        ui.revBtn = btn("⏪ Reverse") {
+            t.reverse = !t.reverse
+            refreshTrackUi(i)
+            saveTrackPrefs(i)
+        }
+        a2.addView(ui.revBtn, weight())
+        a2.addView(btn("↶ Undo") { undoTrack(i) }, weight())
+        a2.addView(btn("⋯ More") { moreDialog(i) }, weight())
+        c.addView(a2)
 
         // Mute, solo, volume, pan
         val mix = hbox()
@@ -638,45 +695,31 @@ class MainActivity : Activity() {
         bm.addView(ui.modeBtn, weight())
         c.addView(bm)
 
-        // Effects: two slots, any effect in each
-        val fxPanel = LinearLayout(this)
-        fxPanel.orientation = LinearLayout.VERTICAL
-        fxPanel.visibility = View.GONE
-        for (s in 0 until 2) {
-            fxPanel.addView(label("Effect ${s + 1}", 12f))
-            val line = hbox()
-            line.gravity = Gravity.CENTER_VERTICAL
-            val sp = Spinner(this)
-            val ad = ArrayAdapter(this, android.R.layout.simple_spinner_item, FX_NAMES)
-            ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-            sp.adapter = ad
-            sp.setSelection(t.fx[s].type)
-            sp.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                    val f = t.fx[s]
-                    if (f.type != pos) {
-                        f.type = pos
-                        f.reset()
-                        saveTrackPrefs(i)
-                    }
-                }
+        // Speed of this track alone (100% = the shared clock)
+        val sp = hbox()
+        sp.gravity = Gravity.CENTER_VERTICAL
+        ui.speedText = label("Speed 100%", 12f)
+        sp.addView(ui.speedText, LinearLayout.LayoutParams(dp(100), LinearLayout.LayoutParams.WRAP_CONTENT))
+        ui.speedBar = seek(150, ((t.speed * 100).roundToInt() - 50)) { setSpeed(i, 50 + it) }
+        sp.addView(ui.speedBar, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        sp.addView(btn("½") { setSpeed(i, 50) }, LinearLayout.LayoutParams(dp(48), dp(44)))
+        sp.addView(btn("1×") { setSpeed(i, 100) }, LinearLayout.LayoutParams(dp(48), dp(44)))
+        sp.addView(btn("2×") { setSpeed(i, 200) }, LinearLayout.LayoutParams(dp(48), dp(44)))
+        c.addView(sp)
 
-                override fun onNothingSelected(p: AdapterView<*>?) {}
-            }
-            line.addView(sp, LinearLayout.LayoutParams(dp(150), LinearLayout.LayoutParams.WRAP_CONTENT))
-            val amt = seek(100, (t.fx[s].amount * 100).toInt()) {
-                t.fx[s].amount = it / 100f
-                saveTrackPrefs(i)
-            }
-            line.addView(amt, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            fxPanel.addView(line)
-        }
-        val fxBtn = btn("🎛 Effects  ▾") {
-            fxPanel.visibility = if (fxPanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        }
-        c.addView(fxBtn)
-        c.addView(fxPanel)
+        c.addView(btn("🎚 Effects of this track") {
+            fxTrack = i
+            showTab(1)
+        })
         return c
+    }
+
+    private fun setSpeed(i: Int, percent: Int) {
+        val p = percent.coerceIn(50, 200)
+        trackStates[i].speed = p / 100f
+        tui[i].speedText.text = "Speed $p%"
+        tui[i].speedBar.progress = p - 50
+        saveTrackPrefs(i)
     }
 
     private fun refreshTrackUi(i: Int) {
@@ -686,14 +729,22 @@ class MainActivity : Activity() {
         ui.name.text = if (f == null) "(empty) record or load a sound" else f.nameWithoutExtension
         ui.src.text = "🎤 " + ui.srcLabel
         ui.recBtn.text = if (recording && recTrack == i) "■ Stop" else "● Rec"
-        if (recording && recTrack == i) styleBtn(ui.recBtn, "#C62828", "#FFFFFF") else styleBtn(ui.recBtn, "#2F3133", "#FF6B6B")
+        if (recording && recTrack == i) {
+            styleBtn(ui.recBtn, "#C62828", "#FFFFFF")
+        } else {
+            styleBtn(ui.recBtn, "#2F3133", "#FF6B6B")
+        }
         setToggle(ui.muteBtn, t.mute, "#E53935", "#FFFFFF")
         setToggle(ui.soloBtn, t.solo, "#F9A825", "#000000")
+        setToggle(ui.revBtn, t.reverse, "#00ACC1", "#000000")
         for (k in 0 until 5) {
             val b = ui.beatBtns[k]
             if (b != null) setToggle(b, beatValues[k] == t.beats, trackColorHex(i), "#000000")
         }
         ui.modeBtn.text = if (t.fit) "⟲ LOOP" else "• HIT"
+        val pct = (t.speed * 100).roundToInt()
+        ui.speedText.text = "Speed $pct%"
+        ui.speedBar.progress = (pct - 50).coerceIn(0, 150)
         ui.steps.bars = computeBars(i)
     }
 
@@ -703,15 +754,19 @@ class MainActivity : Activity() {
         val out = FloatArray(16)
         val t = trackStates[i]
         val d = t.data ?: return out
-        val total = if (t.fit) d.size.toDouble() else t.beats * 60.0 / engine.bpm * ENGINE_RATE
+        val n = d.size
+        val rs = (t.regionStart * n).toInt().coerceIn(0, n - 1)
+        val re = (t.regionEnd * n).toInt().coerceIn(rs + 1, n)
+        val regLen = re - rs
+        val total = if (t.fit) regLen.toDouble() else t.beats * 60.0 / engine.bpm * ENGINE_RATE
         for (b in 0 until 16) {
             val a = (b / 16.0 * total).toInt()
             val e = ((b + 1) / 16.0 * total).toInt().coerceAtLeast(a + 1)
-            val end = minOf(e, d.size)
+            val endIdx = minOf(e, regLen)
             var m = 0
             var k = a
-            while (k < end) {
-                val v = abs(d[k].toInt())
+            while (k < endIdx) {
+                val v = abs(d[rs + k].toInt())
                 if (v > m) m = v
                 k++
             }
@@ -827,13 +882,47 @@ class MainActivity : Activity() {
         return true
     }
 
+    private fun takeSnapshot(i: Int) {
+        val t = trackStates[i]
+        tui[i].snap = Snap(
+            t.data, tui[i].file, t.beats, t.fit, t.regionStart, t.regionEnd, t.speed, t.reverse
+        )
+    }
+
+    private fun undoTrack(i: Int) {
+        val s = tui[i].snap
+        if (s == null) {
+            toast("Nothing to undo on this track")
+            return
+        }
+        val t = trackStates[i]
+        t.data = s.data
+        tui[i].file = s.file
+        t.beats = s.beats
+        t.fit = s.fit
+        t.regionStart = s.rs
+        t.regionEnd = s.re
+        t.speed = s.speed
+        t.reverse = s.rev
+        tui[i].snap = null
+        saveTrackPrefs(i)
+        refreshTrackUi(i)
+    }
+
     // Puts a sound on a track. With autoSetup the loop length is chosen from the sound length.
-    private fun assignFileToTrack(i: Int, f: File, autoSetup: Boolean) {
+    // With keepLoop the region, speed and direction stay as they are.
+    private fun assignFileToTrack(i: Int, f: File, autoSetup: Boolean, keepLoop: Boolean = false) {
+        takeSnapshot(i)
         if (!loadTrackData(i, f)) {
             toast("Cannot read this file")
             return
         }
         val t = trackStates[i]
+        if (!keepLoop) {
+            t.regionStart = 0f
+            t.regionEnd = 1f
+            t.reverse = false
+        }
         if (autoSetup) {
             val d = t.data
             if (d != null) {
@@ -862,6 +951,7 @@ class MainActivity : Activity() {
     }
 
     private fun clearTrack(i: Int) {
+        takeSnapshot(i)
         trackStates[i].data = null
         tui[i].file = null
         saveTrackPrefs(i)
@@ -875,6 +965,128 @@ class MainActivity : Activity() {
             return
         }
         openEditor(f)
+    }
+
+    private fun copyTrack(src: Int, dst: Int) {
+        if (src == dst) return
+        val s = trackStates[src]
+        val d = trackStates[dst]
+        takeSnapshot(dst)
+        d.data = s.data
+        tui[dst].file = tui[src].file
+        d.beats = s.beats
+        d.fit = s.fit
+        d.regionStart = s.regionStart
+        d.regionEnd = s.regionEnd
+        d.speed = s.speed
+        d.reverse = s.reverse
+        saveTrackPrefs(dst)
+        refreshTrackUi(dst)
+    }
+
+    private fun resetLoopSettings(i: Int) {
+        val t = trackStates[i]
+        takeSnapshot(i)
+        t.speed = 1f
+        t.regionStart = 0f
+        t.regionEnd = 1f
+        t.reverse = false
+        saveTrackPrefs(i)
+        refreshTrackUi(i)
+    }
+
+    private fun moreDialog(i: Int) {
+        val items = arrayOf(
+            "✂ Edit this sound (cut, fade, normalize...)",
+            "⧉ Copy this track to another track",
+            "↺ Reset speed, region and direction"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Track ${i + 1}")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> editTrack(i)
+                    1 -> copyDialog(i)
+                    2 -> resetLoopSettings(i)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun copyDialog(src: Int) {
+        val targets = (0 until TRACKS).filter { it != src }
+        val items = targets.map { "Track ${it + 1}" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Copy track ${src + 1} to...")
+            .setItems(items) { _, which -> copyTrack(src, targets[which]) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // Choose which part of the sound plays in the loop
+    private fun regionDialog(i: Int) {
+        val t = trackStates[i]
+        val d = t.data
+        if (d == null) {
+            toast("This track is empty")
+            return
+        }
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(dp(16), dp(8), dp(16), dp(8))
+        val w = WaveformView(this)
+        w.peaks = computePeaks(Sample(d, ENGINE_RATE, 1), 800)
+        w.setSelection(t.regionStart, t.regionEnd)
+        box.addView(w, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(160)))
+        val info = label("", 13f)
+        box.addView(info)
+
+        fun showInfo() {
+            info.text = String.format(
+                Locale.US, "Loop from %.2f s to %.2f s (of %.2f s)",
+                w.selStart * d.size / ENGINE_RATE, w.selEnd * d.size / ENGINE_RATE,
+                d.size.toDouble() / ENGINE_RATE
+            )
+        }
+        w.onSelection = { _, _ -> showInfo() }
+        showInfo()
+
+        var preview: AudioTrack? = null
+        box.addView(btn("▶ Play this part") {
+            preview?.release()
+            val a = (w.selStart * d.size).toInt().coerceIn(0, d.size - 1)
+            val b = (w.selEnd * d.size).toInt().coerceIn(a + 1, d.size)
+            preview = makeTrackFromShorts(d.copyOfRange(a, b), ENGINE_RATE, 1)
+            preview?.play()
+        })
+        box.addView(
+            label(
+                "Drag the two orange handles. Only the part between them plays in the loop. " +
+                    "The sound itself is not cut, so you can change this any time.", 12f
+            )
+        )
+
+        AlertDialog.Builder(this)
+            .setTitle("Loop region - track ${i + 1}")
+            .setView(box)
+            .setPositiveButton("Set") { _, _ ->
+                takeSnapshot(i)
+                t.regionStart = w.selStart
+                t.regionEnd = w.selEnd
+                saveTrackPrefs(i)
+                refreshTrackUi(i)
+            }
+            .setNeutralButton("Whole sound") { _, _ ->
+                takeSnapshot(i)
+                t.regionStart = 0f
+                t.regionEnd = 1f
+                saveTrackPrefs(i)
+                refreshTrackUi(i)
+            }
+            .setNegativeButton("Cancel", null)
+            .setOnDismissListener { preview?.release() }
+            .show()
     }
 
     private fun loadDialog(i: Int) {
@@ -947,14 +1159,22 @@ class MainActivity : Activity() {
         ed.putString("t$i.src", tui[i].srcLabel)
         ed.putInt("t$i.beats", t.beats)
         ed.putBoolean("t$i.fit", t.fit)
+        ed.putFloat("t$i.speed", t.speed)
+        ed.putBoolean("t$i.rev", t.reverse)
+        ed.putFloat("t$i.rs", t.regionStart)
+        ed.putFloat("t$i.re", t.regionEnd)
         ed.putFloat("t$i.vol", t.volume)
         ed.putFloat("t$i.pan", t.pan)
         ed.putBoolean("t$i.mute", t.mute)
         ed.putBoolean("t$i.solo", t.solo)
-        for (s in 0 until 2) {
-            ed.putInt("t$i.fx$s.type", t.fx[s].type)
-            ed.putFloat("t$i.fx$s.amt", t.fx[s].amount)
+        for (k in 0 until FX_COUNT) {
+            val u = t.units[k]
+            ed.putBoolean("t$i.u$k.on", u.enabled)
+            ed.putFloat("t$i.u$k.p1", u.p1)
+            ed.putFloat("t$i.u$k.p2", u.p2)
+            ed.putInt("t$i.u$k.mode", u.mode)
         }
+        ed.putString("t$i.order", t.order.joinToString(","))
         ed.apply()
     }
 
@@ -965,13 +1185,25 @@ class MainActivity : Activity() {
             val t = trackStates[i]
             t.beats = prefs.getInt("t$i.beats", 4)
             t.fit = prefs.getBoolean("t$i.fit", true)
+            t.speed = prefs.getFloat("t$i.speed", 1f)
+            t.reverse = prefs.getBoolean("t$i.rev", false)
+            t.regionStart = prefs.getFloat("t$i.rs", 0f)
+            t.regionEnd = prefs.getFloat("t$i.re", 1f)
             t.volume = prefs.getFloat("t$i.vol", 0.8f)
             t.pan = prefs.getFloat("t$i.pan", 0f)
             t.mute = prefs.getBoolean("t$i.mute", false)
             t.solo = prefs.getBoolean("t$i.solo", false)
-            for (s in 0 until 2) {
-                t.fx[s].type = prefs.getInt("t$i.fx$s.type", 0)
-                t.fx[s].amount = prefs.getFloat("t$i.fx$s.amt", 0.5f)
+            for (k in 0 until FX_COUNT) {
+                val u = t.units[k]
+                u.enabled = prefs.getBoolean("t$i.u$k.on", false)
+                u.p1 = prefs.getFloat("t$i.u$k.p1", 0.5f)
+                u.p2 = prefs.getFloat("t$i.u$k.p2", 0.5f)
+                u.mode = prefs.getInt("t$i.u$k.mode", 0)
+            }
+            val ordStr = prefs.getString("t$i.order", "") ?: ""
+            val parts = ordStr.split(",").mapNotNull { it.trim().toIntOrNull() }
+            if (parts.size == FX_COUNT && parts.toSet().size == FX_COUNT && parts.all { it in 0 until FX_COUNT }) {
+                t.order = parts.toIntArray()
             }
             tui[i].srcLabel = prefs.getString("t$i.src", "Internal mic") ?: "Internal mic"
             val fname = prefs.getString("t$i.file", "") ?: ""
@@ -980,6 +1212,113 @@ class MainActivity : Activity() {
                 if (f.exists()) loadTrackData(i, f)
             }
         }
+    }
+
+    // =====================================================================
+    // FX (the effect chain of each track)
+    // =====================================================================
+
+    private fun buildFx(): View {
+        val col = column()
+        col.addView(label("🎚 Effects", 20f))
+        col.addView(
+            label(
+                "The six effects of the FM-1 (Filter, Reverb, Delay, Distortion, Chorus, Phaser) " +
+                    "plus three extras (Lo-fi, Wobble, Chop). Switch on any of them on any track. " +
+                    "The sound goes through them from the top to the bottom, so use ▲ ▼ to change the order.",
+                13f
+            )
+        )
+        val sel = hbox()
+        for (i in 0 until TRACKS) {
+            val b = btn("Track ${i + 1}") {
+                fxTrack = i
+                buildFxRows()
+            }
+            fxTrackBtns[i] = b
+            sel.addView(b, weight())
+        }
+        col.addView(sel)
+        fxList = LinearLayout(this)
+        fxList.orientation = LinearLayout.VERTICAL
+        col.addView(fxList)
+        buildFxRows()
+        return col
+    }
+
+    private fun buildFxRows() {
+        val i = fxTrack
+        val t = trackStates[i]
+        for (k in 0 until TRACKS) {
+            val b = fxTrackBtns[k]
+            if (b != null) setToggle(b, k == i, trackColorHex(k), "#000000")
+        }
+        fxList.removeAllViews()
+
+        val off = btn("Turn all effects off on this track") {
+            for (u in t.units) u.enabled = false
+            saveTrackPrefs(i)
+            buildFxRows()
+        }
+        fxList.addView(off)
+
+        val ord = t.order
+        for (pos in 0 until FX_COUNT) {
+            val kind = ord[pos]
+            val u = t.units[kind]
+            val c = card()
+
+            val head = hbox()
+            head.gravity = Gravity.CENTER_VERTICAL
+            val onBtn = btn(if (u.enabled) "ON" else "OFF") {
+                u.enabled = !u.enabled
+                if (u.enabled) u.reset()
+                saveTrackPrefs(i)
+                buildFxRows()
+            }
+            setToggle(onBtn, u.enabled, "#2E7D32", "#FFFFFF")
+            head.addView(onBtn, LinearLayout.LayoutParams(dp(64), dp(44)))
+            val title = label(FX_NAMES[kind] + (if (kind < 6) "  (FM-1)" else "  (extra)"), 16f)
+            title.setPadding(dp(10), 0, 0, 0)
+            head.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            if (kind == 0) {
+                val modeNames = arrayOf("LP", "HP", "BP")
+                val modeBtn = btn(modeNames[u.mode.coerceIn(0, 2)]) {
+                    u.mode = (u.mode + 1) % 3
+                    saveTrackPrefs(i)
+                    buildFxRows()
+                }
+                head.addView(modeBtn, LinearLayout.LayoutParams(dp(56), dp(44)))
+            }
+            head.addView(btn("▲") { moveFx(i, pos, -1) }, LinearLayout.LayoutParams(dp(48), dp(44)))
+            head.addView(btn("▼") { moveFx(i, pos, 1) }, LinearLayout.LayoutParams(dp(48), dp(44)))
+            c.addView(head)
+
+            c.addView(label(FX_PARAM1[kind], 12f))
+            c.addView(seek(100, (u.p1 * 100).toInt()) {
+                u.p1 = it / 100f
+                saveTrackPrefs(i)
+            })
+            c.addView(label(FX_PARAM2[kind], 12f))
+            c.addView(seek(100, (u.p2 * 100).toInt()) {
+                u.p2 = it / 100f
+                saveTrackPrefs(i)
+            })
+            fxList.addView(c)
+        }
+    }
+
+    private fun moveFx(i: Int, pos: Int, dir: Int) {
+        val t = trackStates[i]
+        val n = pos + dir
+        if (n < 0 || n >= FX_COUNT) return
+        val arr = t.order.copyOf()
+        val tmp = arr[pos]
+        arr[pos] = arr[n]
+        arr[n] = tmp
+        t.order = arr
+        saveTrackPrefs(i)
+        buildFxRows()
     }
 
     // ---------------- recording into a track ----------------
@@ -1069,11 +1408,26 @@ class MainActivity : Activity() {
         }
         if (dev != null) rec.setPreferredDevice(dev)
 
+        // Sync record: wait for the next loop start, then record exactly one loop length
+        val sync = syncRecOn
+        val overdub = overdubOn && trackStates[trackIdx].data != null
+        val loopBeats = trackStates[trackIdx].beats
+        val latFrames = recLatencyMs * rate / 1000
+        if (sync && !engine.playing) startAll()
+        val beatSec = 60.0 / engine.bpm
+        val targetBytes: Long =
+            if (sync) ((loopBeats * beatSec * rate).toLong() + latFrames) * 2L * nch else Long.MAX_VALUE
+        val startBeat = if (sync) ceil(engine.beatPos / loopBeats) * loopBeats else -1.0
+
         val pcm = ByteArrayOutputStream()
         val maxBytes = 30 * rate * 2 * nch
         recTrack = trackIdx
         recording = true
-        recStatus.text = "Recording track ${trackIdx + 1}... (max 30 s)"
+        recStatus.text = if (sync) {
+            "Track ${trackIdx + 1}: waiting for the next loop start..."
+        } else {
+            "Recording track ${trackIdx + 1}... (max 30 s)"
+        }
         clipWarn.visibility = View.GONE
         refreshTrackUi(trackIdx)
 
@@ -1081,12 +1435,20 @@ class MainActivity : Activity() {
             val buf = ByteArray(minBuf)
             var rawPeakAll = 0
             var clipHit = false
+            var collecting = !sync
             try {
                 rec.startRecording()
-                while (recording && pcm.size() < maxBytes) {
+                while (recording && pcm.size() < targetBytes && pcm.size() < maxBytes) {
                     val n = rec.read(buf, 0, buf.size)
                     if (n < 0) break
                     if (n == 0) continue
+                    if (!collecting) {
+                        if (engine.beatPos >= startBeat || !engine.playing) {
+                            collecting = true
+                        } else {
+                            continue
+                        }
+                    }
                     val rawPeak = peakOf(buf, n)
                     if (rawPeak > rawPeakAll) rawPeakAll = rawPeak
                     if (rawPeak >= 32000) clipHit = true
@@ -1102,7 +1464,7 @@ class MainActivity : Activity() {
                         runOnUiThread {
                             recMeter.level = shown
                             recStatus.text = String.format(
-                                Locale.US, "Recording track %d... %.1f s (max 30 s)", trackIdx + 1, secs
+                                Locale.US, "Recording track %d... %.1f s", trackIdx + 1, secs
                             )
                             if (showClip) {
                                 clipWarn.text = "CLIPPING - lower the volume on your instrument and record again."
@@ -1119,11 +1481,19 @@ class MainActivity : Activity() {
             }
             rec.release()
             recording = false
-            finishRecording(trackIdx, pcm.toByteArray(), rate, nch, rawPeakAll)
+            finishRecording(trackIdx, pcm.toByteArray(), rate, nch, rawPeakAll, sync, overdub, latFrames)
         }.start()
     }
 
-    private fun finishRecording(trackIdx: Int, data: ByteArray, rate: Int, nch: Int, rawPeak: Int) {
+    private fun finishRecording(
+        trackIdx: Int, raw: ByteArray, rate: Int, nch: Int, rawPeak: Int,
+        sync: Boolean, overdub: Boolean, latFrames: Int
+    ) {
+        var data = raw
+        if (sync && latFrames > 0) {
+            val skip = latFrames * 2 * nch
+            if (skip < data.size) data = data.copyOfRange(skip, data.size)
+        }
         if (data.isEmpty()) {
             runOnUiThread {
                 recMeter.level = 0f
@@ -1137,8 +1507,8 @@ class MainActivity : Activity() {
             val p = peakOf(data, data.size)
             if (p > 0) scalePcm(data, data.size, 0.7f * 32768f / p)
         }
-        val name = "Rec_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val file = uniqueFile(name)
+        val baseName = "Rec_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val file = uniqueFile(baseName)
         try {
             writeWav(file, data, rate, nch)
         } catch (e: Exception) {
@@ -1152,10 +1522,12 @@ class MainActivity : Activity() {
         val finalPeak = peakOf(data, data.size) * 100 / 32768
         val secs = data.size.toDouble() / (rate * nch * 2)
         val clipped = rawPeak >= 32000
+        val take = data
         runOnUiThread {
             recMeter.level = 0f
             var msg = String.format(
-                Locale.US, "Saved %s on track %d - %.1f s, peak %d%%", file.name, trackIdx + 1, secs, finalPeak
+                Locale.US, "Saved %s on track %d - %.1f s, peak %d%%",
+                file.name, trackIdx + 1, secs, finalPeak
             )
             if (clipped) {
                 msg += "\nThe input was clipping. Lower the volume on your instrument " +
@@ -1163,7 +1535,34 @@ class MainActivity : Activity() {
             }
             recStatus.text = msg
             recTrack = -1
-            assignFileToTrack(trackIdx, file, true)
+            val t = trackStates[trackIdx]
+            val old = t.data
+            if (overdub && old != null) {
+                // Mix the new take into the sound that is already on the track
+                val newMono = resampleMono(
+                    mixToMono(bytesToShorts(take, 0, take.size), nch), rate, ENGINE_RATE
+                )
+                val mixed = old.copyOf()
+                val m = minOf(mixed.size, newMono.size)
+                for (k in 0 until m) {
+                    mixed[k] = (mixed[k] + newMono[k]).coerceIn(-32768, 32767).toShort()
+                }
+                val mixFile = uniqueFile(baseName + "_mix")
+                try {
+                    writeWav(mixFile, shortsToBytes(mixed), ENGINE_RATE, 1)
+                    assignFileToTrack(trackIdx, mixFile, false, true)
+                } catch (e: Exception) {
+                    toast("Could not save the mix: ${e.message}")
+                }
+            } else {
+                assignFileToTrack(trackIdx, file, !sync)
+                if (sync) {
+                    t.fit = true
+                    saveTrackPrefs(trackIdx)
+                    refreshTrackUi(trackIdx)
+                }
+            }
+            refreshLibrary()
         }
     }
 
@@ -1512,7 +1911,8 @@ class MainActivity : Activity() {
         col.addView(
             label(
                 "Drag the two orange handles to choose a part of the sound. " +
-                    "Trim keeps only the selected part. Normalize raises the level to 90%.", 13f
+                    "Trim keeps only the selected part. Normalize raises the level to 90%. " +
+                    "To loop only a part without cutting the sound, use Region on the track.", 13f
             )
         )
         return col
@@ -1528,7 +1928,7 @@ class MainActivity : Activity() {
         edSample = s
         edUndo = null
         wave.setSelection(0f, 1f)
-        showTab(2)
+        showTab(3)
     }
 
     private fun computePeaks(s: Sample, bins: Int): FloatArray {
