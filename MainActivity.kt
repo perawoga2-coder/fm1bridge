@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -24,6 +25,7 @@ import android.media.midi.MidiManager
 import android.media.midi.MidiOutputPort
 import android.media.midi.MidiReceiver
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -54,6 +56,7 @@ import java.util.concurrent.locks.LockSupport
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.ln
+import kotlin.math.log10
 import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
@@ -91,6 +94,10 @@ class MainActivity : Activity() {
         lateinit var revBtn: Button
         lateinit var speedText: TextView
         lateinit var speedBar: SeekBar
+        lateinit var card: LinearLayout
+        lateinit var details: LinearLayout
+        lateinit var volBar: SeekBar
+        lateinit var panBar: SeekBar
         val beatBtns = arrayOfNulls<Button>(5)
         var file: File? = null
         var srcLabel = "Internal mic"
@@ -125,6 +132,21 @@ class MainActivity : Activity() {
     private lateinit var bpmBar: SeekBar
     private lateinit var masterMeter: MeterView
     private var lastPlayShown = -1
+    private var selTrack = 0
+    private lateinit var masterSeek: SeekBar
+    private val mixFader = arrayOfNulls<FaderView>(TRACKS + 1)
+    private val mixMeter = arrayOfNulls<VMeterView>(TRACKS + 1)
+    private val mixPeakText = arrayOfNulls<TextView>(TRACKS + 1)
+    private val mixFaderText = arrayOfNulls<TextView>(TRACKS + 1)
+    private val mixMute = arrayOfNulls<Button>(TRACKS)
+    private val mixSolo = arrayOfNulls<Button>(TRACKS)
+    private lateinit var hdrInfo: TextView
+    private lateinit var hdrRight: TextView
+    private lateinit var chipOut: TextView
+    private lateinit var chipFx: TextView
+    private lateinit var chipSync: TextView
+    private var outputLabel = "Automatic"
+    private var liveTick = 0
     private val taps = ArrayList<Long>()
     @Volatile private var clockMode = 0 // 0 = internal, 1 = send to FM-1, 2 = follow FM-1
     @Volatile private var clockDelayMs = 0
@@ -191,15 +213,20 @@ class MainActivity : Activity() {
         samplesDir = File(filesDir, "samples")
         samplesDir.mkdirs()
         restoreState()
+        applySavedOutput()
 
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
         root.setBackgroundColor(Color.parseColor("#0E0E0E"))
 
+        root.addView(buildHeader())
+
         val tabBar = hbox()
-        val tabNames = listOf("🎛 Tracks", "🎚 FX", "📚 Library", "✂ Edit", "🥁 Pads")
+        val tabNames = listOf("🎛 Tracks", "🎚 Mixer", "✨ FX", "📚 Library", "✂ Edit", "🥁 Pads")
         tabNames.forEachIndexed { i, n ->
-            tabBar.addView(btn(n) { showTab(i) }, weight())
+            val tb = btn(n) { showTab(i) }
+            tb.textSize = 12f
+            tabBar.addView(tb, weight())
         }
         root.addView(tabBar)
 
@@ -215,6 +242,7 @@ class MainActivity : Activity() {
         val content = FrameLayout(this)
         tabViews = listOf(
             scroll(buildTracks()),
+            scroll(buildMixer()),
             scroll(buildFx()),
             scroll(buildLibrary()),
             scroll(buildEdit()),
@@ -227,6 +255,7 @@ class MainActivity : Activity() {
         reloadPads()
         for (i in 0 until TRACKS) refreshTrackUi(i)
         setBpm(engine.bpm.roundToInt())
+        refreshHeader()
         showTab(0)
 
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -270,9 +299,12 @@ class MainActivity : Activity() {
             scanInputs()
             for (k in 0 until TRACKS) refreshTrackUi(k)
         }
-        if (i == 1) buildFxRows()
-        if (i == 2) refreshLibrary()
-        if (i == 3) refreshEditor()
+        if (i == 1) {
+            for (k in 0 until TRACKS) syncMixer(k)
+        }
+        if (i == 2) buildFxRows()
+        if (i == 3) refreshLibrary()
+        if (i == 4) refreshEditor()
     }
 
     // ---------------- small UI helpers ----------------
@@ -406,6 +438,7 @@ class MainActivity : Activity() {
                 .setBufferSizeInBytes(d.size * 2)
                 .setTransferMode(AudioTrack.MODE_STATIC)
                 .build()
+            engine.outputDevice?.let { t.setPreferredDevice(it) }
             t.write(d, 0, d.size)
             t
         } catch (e: Exception) {
@@ -435,9 +468,44 @@ class MainActivity : Activity() {
     private fun buildTracks(): View {
         val col = column()
         col.addView(buildTransportCard())
-        col.addView(buildInputCard())
         for (i in 0 until TRACKS) col.addView(buildTrackCard(i))
+
+        val foot = label("TAP A ROW TO OPEN ITS CONTROLS  ·  ● REC = SAMPLE INTO THAT TRACK", 12f)
+        foot.setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+        foot.setTextColor(Color.BLACK)
+        foot.gravity = Gravity.CENTER
+        foot.setPadding(dp(10), dp(10), dp(10), dp(10))
+        val fbg = GradientDrawable()
+        fbg.setColor(Color.parseColor("#EFEBDD"))
+        fbg.cornerRadius = dp(14).toFloat()
+        foot.background = fbg
+        val flp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+        flp.setMargins(0, 0, 0, dp(12))
+        col.addView(foot, flp)
+
+        col.addView(buildInputCard())
+        selectTrack(0)
         return col
+    }
+
+    // Tap a row to select it and open or close its controls
+    private fun selectTrack(i: Int) {
+        val wasOpen = tui[i].details.visibility == View.VISIBLE
+        for (k in 0 until TRACKS) {
+            val open = (k == i) && !wasOpen
+            tui[k].details.visibility = if (open) View.VISIBLE else View.GONE
+            paintCard(k, k == i)
+        }
+        selTrack = i
+    }
+
+    private fun paintCard(k: Int, selected: Boolean) {
+        val bg = GradientDrawable()
+        bg.setColor(Color.parseColor(if (selected) "#242B28" else "#1B1B1B"))
+        bg.cornerRadius = dp(14).toFloat()
+        tui[k].card.background = bg
     }
 
     private fun buildTransportCard(): View {
@@ -479,11 +547,13 @@ class MainActivity : Activity() {
         val mrow = hbox()
         mrow.gravity = Gravity.CENTER_VERTICAL
         mrow.addView(label("MASTER", 13f), LinearLayout.LayoutParams(dp(72), LinearLayout.LayoutParams.WRAP_CONTENT))
-        val masterBar = seek(100, (engine.masterVol * 100).toInt()) {
+        masterSeek = seek(100, (engine.masterVol * 100).toInt()) {
             engine.masterVol = it / 100f
             prefs.edit().putFloat("master", it / 100f).apply()
+            mixFader[TRACKS]?.value = it / 100f
+            mixFaderText[TRACKS]?.text = dbText(it / 100f)
         }
-        mrow.addView(masterBar, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        mrow.addView(masterSeek, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         masterMeter = MeterView(this)
         mrow.addView(masterMeter, LinearLayout.LayoutParams(dp(90), dp(14)))
         c.addView(mrow)
@@ -604,6 +674,7 @@ class MainActivity : Activity() {
         names.orientation = LinearLayout.VERTICAL
         names.setPadding(dp(12), 0, dp(8), 0)
         ui.name = label("", 17f)
+        ui.name.setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
         ui.src = label("", 12f)
         ui.src.setTextColor(Color.parseColor("#9AA0A6"))
         names.addView(ui.name)
@@ -611,7 +682,10 @@ class MainActivity : Activity() {
         head.addView(names, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         ui.meter = MeterView(this)
         head.addView(ui.meter, LinearLayout.LayoutParams(dp(90), dp(14)))
-        c.addView(head)
+        val rowBox = LinearLayout(this)
+        rowBox.orientation = LinearLayout.VERTICAL
+        rowBox.setOnClickListener { selectTrack(i) }
+        rowBox.addView(head)
 
         // 16 step bars with a moving playhead
         ui.steps = StepBarView(this)
@@ -619,7 +693,15 @@ class MainActivity : Activity() {
         val stepLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(56))
         stepLp.topMargin = dp(10)
         stepLp.bottomMargin = dp(6)
-        c.addView(ui.steps, stepLp)
+        rowBox.addView(ui.steps, stepLp)
+        c.addView(rowBox)
+
+        // Everything below opens when the row is tapped
+        val details = LinearLayout(this)
+        details.orientation = LinearLayout.VERTICAL
+        details.visibility = View.GONE
+        ui.details = details
+        ui.card = c
 
         // Actions, row 1
         val a1 = hbox()
@@ -628,7 +710,7 @@ class MainActivity : Activity() {
         a1.addView(btn("📂 Load") { loadDialog(i) }, weight())
         a1.addView(btn("🎤 Input") { sourceDialog(i) }, weight())
         a1.addView(btn("✕ Clear") { clearTrack(i) }, weight())
-        c.addView(a1)
+        details.addView(a1)
 
         // Actions, row 2
         val a2 = hbox()
@@ -641,7 +723,7 @@ class MainActivity : Activity() {
         a2.addView(ui.revBtn, weight())
         a2.addView(btn("↶ Undo") { undoTrack(i) }, weight())
         a2.addView(btn("⋯ More") { moreDialog(i) }, weight())
-        c.addView(a2)
+        details.addView(a2)
 
         // Mute, solo, volume, pan
         val mix = hbox()
@@ -662,20 +744,23 @@ class MainActivity : Activity() {
         faders.orientation = LinearLayout.VERTICAL
         faders.setPadding(dp(8), 0, 0, 0)
         faders.addView(label("Volume", 12f))
-        faders.addView(seek(100, (t.volume * 100).toInt()) {
+        ui.volBar = seek(100, (t.volume * 100).toInt()) {
             t.volume = it / 100f
+            syncMixer(i)
             saveTrackPrefs(i)
-        })
+        }
+        faders.addView(ui.volBar)
         faders.addView(label("Pan (left - right)", 12f))
-        faders.addView(seek(200, ((t.pan + 1f) * 100).toInt()) {
+        ui.panBar = seek(200, ((t.pan + 1f) * 100).toInt()) {
             t.pan = (it - 100) / 100f
             saveTrackPrefs(i)
-        })
+        }
+        faders.addView(ui.panBar)
         mix.addView(faders, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        c.addView(mix)
+        details.addView(mix)
 
         // Loop length in beats and loop/hit mode
-        c.addView(label("Loop length (beats)", 12f))
+        details.addView(label("Loop length (beats)", 12f))
         val bm = hbox()
         for (k in 0 until 5) {
             val b = beatValues[k]
@@ -693,7 +778,7 @@ class MainActivity : Activity() {
             saveTrackPrefs(i)
         }
         bm.addView(ui.modeBtn, weight())
-        c.addView(bm)
+        details.addView(bm)
 
         // Speed of this track alone (100% = the shared clock)
         val sp = hbox()
@@ -705,12 +790,13 @@ class MainActivity : Activity() {
         sp.addView(btn("½") { setSpeed(i, 50) }, LinearLayout.LayoutParams(dp(48), dp(44)))
         sp.addView(btn("1×") { setSpeed(i, 100) }, LinearLayout.LayoutParams(dp(48), dp(44)))
         sp.addView(btn("2×") { setSpeed(i, 200) }, LinearLayout.LayoutParams(dp(48), dp(44)))
-        c.addView(sp)
+        details.addView(sp)
 
-        c.addView(btn("🎚 Effects of this track") {
+        details.addView(btn("🎚 Effects of this track") {
             fxTrack = i
-            showTab(1)
+            showTab(2)
         })
+        c.addView(details)
         return c
     }
 
@@ -726,8 +812,8 @@ class MainActivity : Activity() {
         val ui = tui[i]
         val t = trackStates[i]
         val f = ui.file
-        ui.name.text = if (f == null) "(empty) record or load a sound" else f.nameWithoutExtension
-        ui.src.text = "🎤 " + ui.srcLabel
+        ui.name.text = if (f == null) "(EMPTY)  REC OR LOAD" else f.nameWithoutExtension.uppercase(Locale.ROOT)
+        ui.src.text = "🎤 " + ui.srcLabel + regionNote(i)
         ui.recBtn.text = if (recording && recTrack == i) "■ Stop" else "● Rec"
         if (recording && recTrack == i) {
             styleBtn(ui.recBtn, "#C62828", "#FFFFFF")
@@ -745,7 +831,20 @@ class MainActivity : Activity() {
         val pct = (t.speed * 100).roundToInt()
         ui.speedText.text = "Speed $pct%"
         ui.speedBar.progress = (pct - 50).coerceIn(0, 150)
+        ui.volBar.progress = (t.volume * 100).toInt().coerceIn(0, 100)
+        ui.panBar.progress = ((t.pan + 1f) * 100).toInt().coerceIn(0, 200)
         ui.steps.bars = computeBars(i)
+        syncMixer(i)
+    }
+
+    private fun regionNote(i: Int): String {
+        val t = trackStates[i]
+        val d = t.data ?: return ""
+        if (t.regionStart <= 0.001f && t.regionEnd >= 0.999f) return ""
+        return String.format(
+            Locale.US, "  ·  ✂ %.2f-%.2f s",
+            t.regionStart * d.size / ENGINE_RATE, t.regionEnd * d.size / ENGINE_RATE
+        )
     }
 
     private fun trackColorHex(i: Int): String = String.format("#%06X", trackColors[i] and 0xFFFFFF)
@@ -789,10 +888,16 @@ class MainActivity : Activity() {
             ui.meter.level = t.peak
             ui.steps.active =
                 if (playing && t.data != null) (t.loopPhase * 16f).toInt().coerceIn(0, 15) else -1
+            mixMeter[i]?.level = t.peak
+            mixPeakText[i]?.text = dbText(t.peak)
         }
         masterMeter.level = engine.masterPeak
+        mixMeter[TRACKS]?.level = engine.masterPeak
+        mixPeakText[TRACKS]?.text = dbText(engine.masterPeak)
         if (clockMode == 2) bpmText.text = "${engine.bpm.roundToInt()} BPM"
         updatePlayButton()
+        liveTick++
+        if (liveTick % 20 == 0) refreshHeader()
     }
 
     private fun updatePlayButton() {
@@ -870,6 +975,247 @@ class MainActivity : Activity() {
         }
         th.isDaemon = true
         th.start()
+    }
+
+    // =====================================================================
+    // Header bar, mixer view and the output (play onto the FM-1 over USB)
+    // =====================================================================
+
+    private fun dbText(v: Float): String =
+        if (v <= 0.0005f) "-∞" else String.format(Locale.US, "%.1f", 20.0 * log10(v.toDouble()))
+
+    private fun batteryPercent(): Int {
+        val i = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return -1
+        val level = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = i.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        return if (level < 0 || scale <= 0) -1 else level * 100 / scale
+    }
+
+    private fun buildHeader(): View {
+        val bar = hbox()
+        bar.gravity = Gravity.CENTER_VERTICAL
+        bar.setBackgroundColor(Color.parseColor("#141414"))
+        val tag = label("FM1 BRIDGE", 15f)
+        tag.setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+        tag.setTextColor(Color.BLACK)
+        tag.setBackgroundColor(Color.parseColor("#FA5A1E"))
+        tag.setPadding(dp(12), dp(8), dp(12), dp(8))
+        bar.addView(tag)
+        hdrInfo = label("", 13f)
+        hdrInfo.setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+        hdrInfo.setPadding(dp(12), 0, dp(8), 0)
+        bar.addView(hdrInfo, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        hdrRight = label("", 13f)
+        hdrRight.setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+        hdrRight.setPadding(dp(8), 0, dp(12), 0)
+        bar.addView(hdrRight)
+        return bar
+    }
+
+    private fun chip(text: String): TextView {
+        val t = label(text, 12f)
+        t.setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+        t.setPadding(dp(10), dp(6), dp(10), dp(6))
+        return t
+    }
+
+    private fun chipLp(): LinearLayout.LayoutParams {
+        val lp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+        lp.setMargins(0, 0, dp(6), 0)
+        return lp
+    }
+
+    private fun setChip(t: TextView, text: String, on: Boolean, onBg: String) {
+        t.text = text
+        t.setBackgroundColor(Color.parseColor(if (on) onBg else "#2A2C2B"))
+        t.setTextColor(if (on) Color.BLACK else Color.GRAY)
+    }
+
+    private fun refreshHeader() {
+        val out = outputLabel.uppercase(Locale.ROOT)
+        val bat = batteryPercent()
+        hdrInfo.text = "OUT: $out"
+        hdrRight.text = "${engine.bpm.roundToInt()} BPM" + (if (bat >= 0) "  BAT $bat%" else "")
+        var anyFx = false
+        for (t in trackStates) {
+            for (u in t.units) {
+                if (u.enabled) anyFx = true
+            }
+        }
+        val clk = when (clockMode) {
+            1 -> "SEND"
+            2 -> "FOLLOW"
+            else -> "INTERNAL"
+        }
+        setChip(chipOut, "OUT $out", true, "#1FA55B")
+        setChip(chipFx, "FX", anyFx, "#C9A100")
+        setChip(chipSync, "CLOCK $clk", true, "#1FA55B")
+    }
+
+    private fun buildMixer(): View {
+        val col = column()
+        val chips = hbox()
+        chipOut = chip("")
+        chipFx = chip("FX")
+        chipSync = chip("")
+        chipOut.setOnClickListener { outputDialog() }
+        chips.addView(chipOut, chipLp())
+        chips.addView(chipFx, chipLp())
+        chips.addView(chipSync, chipLp())
+        col.addView(chips)
+
+        val title = label("MIXER", 18f)
+        title.setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+        title.gravity = Gravity.CENTER
+        title.setPadding(0, dp(10), 0, dp(10))
+        col.addView(title, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+
+        val strips = hbox()
+        for (i in 0..TRACKS) strips.addView(buildStrip(i), weight())
+        col.addView(strips)
+
+        col.addView(btn("Play the sound on: tablet or FM-1 (USB)...") { outputDialog() })
+        col.addView(
+            label(
+                "To play the four tracks through the FM-1, connect it with a USB cable, tap the OUT " +
+                    "button above and choose the FM-1. The sound then goes into the FM-1 over USB audio. " +
+                    "It reaches the FM-1's own mixer and effects only if its firmware has a USB input, " +
+                    "like the USB IN channel in a firmware mixer.", 12f
+            )
+        )
+        return col
+    }
+
+    private fun buildStrip(i: Int): View {
+        val isMaster = i == TRACKS
+        val s = LinearLayout(this)
+        s.orientation = LinearLayout.VERTICAL
+        s.gravity = Gravity.CENTER_HORIZONTAL
+
+        val peak = label("-∞", 13f)
+        peak.gravity = Gravity.CENTER
+        mixPeakText[i] = peak
+        s.addView(peak)
+        val fdb = label("", 13f)
+        fdb.gravity = Gravity.CENTER
+        fdb.setTextColor(Color.parseColor("#4DA3FF"))
+        mixFaderText[i] = fdb
+        s.addView(fdb)
+
+        val mid = hbox()
+        val meter = VMeterView(this)
+        mixMeter[i] = meter
+        mid.addView(meter, LinearLayout.LayoutParams(0, dp(240), 1f))
+        val fader = FaderView(this)
+        mixFader[i] = fader
+        fader.value = if (isMaster) engine.masterVol else trackStates[i].volume
+        fdb.text = dbText(fader.value)
+        fader.onChange = { v ->
+            fdb.text = dbText(v)
+            if (isMaster) {
+                engine.masterVol = v
+                prefs.edit().putFloat("master", v).apply()
+                masterSeek.progress = (v * 100).toInt()
+            } else {
+                trackStates[i].volume = v
+                tui[i].volBar.progress = (v * 100).toInt()
+                saveTrackPrefs(i)
+            }
+        }
+        mid.addView(fader, LinearLayout.LayoutParams(0, dp(240), 1f))
+        s.addView(mid)
+
+        if (!isMaster) {
+            val t = trackStates[i]
+            val mb = btn("M") {
+                t.mute = !t.mute
+                refreshTrackUi(i)
+                saveTrackPrefs(i)
+            }
+            val sb = btn("S") {
+                t.solo = !t.solo
+                refreshTrackUi(i)
+                saveTrackPrefs(i)
+            }
+            mixMute[i] = mb
+            mixSolo[i] = sb
+            s.addView(mb, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)))
+            s.addView(sb, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)))
+        }
+        val name = label(if (isMaster) "MASTER" else "TRK ${i + 1}", 12f)
+        name.setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+        name.gravity = Gravity.CENTER
+        if (!isMaster) name.setTextColor(trackColors[i])
+        s.addView(name)
+        return s
+    }
+
+    private fun syncMixer(i: Int) {
+        val t = trackStates[i]
+        mixFader[i]?.value = t.volume
+        mixFaderText[i]?.text = dbText(t.volume)
+        val m = mixMute[i]
+        if (m != null) setToggle(m, t.mute, "#E53935", "#FFFFFF")
+        val s = mixSolo[i]
+        if (s != null) setToggle(s, t.solo, "#F9A825", "#000000")
+    }
+
+    private fun outputDevices(): List<AudioDeviceInfo> {
+        val allowed = setOf(
+            AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
+            AudioDeviceInfo.TYPE_USB_DEVICE,
+            AudioDeviceInfo.TYPE_USB_HEADSET,
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+            AudioDeviceInfo.TYPE_WIRED_HEADSET,
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+        )
+        return audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).filter { it.type in allowed }
+    }
+
+    private fun outputName(d: AudioDeviceInfo): String = when (d.type) {
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Tablet speaker"
+        AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET -> "USB: ${d.productName}"
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_WIRED_HEADSET -> "3.5 mm headphones"
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "Bluetooth: ${d.productName}"
+        else -> "Other: ${d.productName}"
+    }
+
+    private fun outputDialog() {
+        val devs = outputDevices()
+        val labels = listOf("Automatic (system default)") + devs.map { outputName(it) }
+        AlertDialog.Builder(this)
+            .setTitle("Play the sound on...")
+            .setItems(labels.toTypedArray()) { _, which ->
+                if (which == 0) {
+                    engine.outputDevice = null
+                    outputLabel = "Automatic"
+                } else {
+                    engine.outputDevice = devs[which - 1]
+                    outputLabel = outputName(devs[which - 1])
+                }
+                prefs.edit().putString("outLabel", outputLabel).apply()
+                reloadPads()
+                refreshHeader()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun applySavedOutput() {
+        val saved = prefs.getString("outLabel", "Automatic") ?: "Automatic"
+        outputLabel = "Automatic"
+        engine.outputDevice = null
+        if (saved != "Automatic") {
+            val dev = outputDevices().firstOrNull { outputName(it) == saved }
+            if (dev != null) {
+                engine.outputDevice = dev
+                outputLabel = saved
+            }
+        }
     }
 
     // ---------------- loading sounds into tracks ----------------
@@ -1928,7 +2274,7 @@ class MainActivity : Activity() {
         edSample = s
         edUndo = null
         wave.setSelection(0f, 1f)
-        showTab(3)
+        showTab(4)
     }
 
     private fun computePeaks(s: Sample, bins: Int): FloatArray {
