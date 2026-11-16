@@ -1,8 +1,9 @@
-Build: Build APK
+name: Build APK
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -22,6 +23,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
+
+      - name: Clean previous build artifacts
+        run: ./gradlew clean
 
       - name: Use the fixed signing key
         env:
