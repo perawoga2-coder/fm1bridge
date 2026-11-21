@@ -11,8 +11,8 @@ android {
         applicationId = "com.makerhip.track16"      // 16 Track Mixer Recorder, a Maker Hip app
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2"
     }
 
     // the Maker Hip key (the same as Burger Studio's): a new APK installs over the old one, and the apps can share later

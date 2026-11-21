@@ -208,3 +208,22 @@ class FaderView(ctx: Context, private val color: Int, private val onChange: (Flo
         return true
     }
 }
+
+/** Two thin meters, left and right (the output), a red cap when it reached the top */
+class StereoMeter(ctx: Context) : View(ctx) {
+    private val p = Paint()
+    var l = 0f
+    var r = 0f
+
+    override fun onDraw(c: Canvas) {
+        val w = width / 2f
+        for (k in 0..1) {
+            val v = (if (k == 0) l else r).coerceIn(0f, 1f)
+            val x0 = k * w + 1
+            p.color = C.PANEL2
+            c.drawRect(x0, 0f, x0 + w - 2, height.toFloat(), p)
+            p.color = if (v > 0.95f) C.RED else if (v > 0.7f) C.YELLOW else C.GREEN
+            c.drawRect(x0, height * (1 - v), x0 + w - 2, height.toFloat(), p)
+        }
+    }
+}

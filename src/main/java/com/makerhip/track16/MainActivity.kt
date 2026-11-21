@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.net.Uri
@@ -53,6 +54,12 @@ class MainActivity : Activity() {
     private lateinit var muteBtn: Button
     private lateinit var soloBtn: Button
     private lateinit var inMeter: View
+    private lateinit var monBtn: Button
+    private lateinit var outMeter: StereoMeter
+    private lateinit var routeText: TextView
+    private lateinit var masterFader: FaderView
+    private lateinit var limBtn: Button
+    private var usbHintShown = false
     private val faders = ArrayList<FaderView>()
     private val stripBtns = ArrayList<Triple<Button, Button, Button>>()
     private var showMixer = false
@@ -70,6 +77,18 @@ class MainActivity : Activity() {
         engine.latencyMs = prefs.getInt("latency", 120)
         engine.metronome = prefs.getBoolean("click", true)
         engine.countIn = prefs.getBoolean("countIn", true)
+        engine.autoAlign = prefs.getBoolean("autoAlign", true)
+        engine.fineMs = prefs.getInt("fine", 0)
+        engine.inputGainDb = prefs.getFloat("inGain", 0f)
+        engine.inputChannel = prefs.getInt("inCh", 0)
+        engine.raw = prefs.getBoolean("raw", true)
+        engine.masterGain = prefs.getFloat("master", 1f)
+        engine.limiter = prefs.getBoolean("limiter", true)
+        val am = getSystemService(AUDIO_SERVICE) as AudioManager
+        engine.burst = am.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)?.toIntOrNull()?.coerceIn(64, 1024) ?: 192
+        val inId = prefs.getInt("inDev", -1)
+        engine.input = am.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.id == inId }
+        am.registerAudioDeviceCallback(devices, ui)
         build()
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
@@ -83,6 +102,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        (getSystemService(AUDIO_SERVICE) as AudioManager).unregisterAudioDeviceCallback(devices)
         ui.removeCallbacksAndMessages(null)
         if (engine.playing) engine.stop()
     }
@@ -187,9 +207,13 @@ class MainActivity : Activity() {
         titleText = text(project.title, 12f, C.DIM, true)
         titleText.setOnClickListener { projectsDialog() }
         timeText = text("0:00.0   1.1", 22f, C.TEXT, true)
+        routeText = text("", 11f, C.DIM)
         tc.addView(titleText)
         tc.addView(timeText)
+        tc.addView(routeText)
         head.addView(tc, lp(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f, dp(14)))
+        outMeter = StereoMeter(this)
+        head.addView(outMeter, lp(dp(14), dp(56), 0f, dp(6)))
         val bpm = row()
         bpm.background = bg(C.PANEL2, 12, C.LINE)
         bpm.addView(btn("−", 18f) { setBpm(project.bpm - 1) }.also { it.background = null })
@@ -216,9 +240,11 @@ class MainActivity : Activity() {
         inMeter = View(this)
         sel.addView(inMeter, lp(dp(6), dp(36), 0f, dp(6)))
         armBtn = btn("ARM") { toggleArm(selected) }
+        monBtn = btn("MON") { toggleMonitor() }
         muteBtn = btn("M") { val t = project.tracks[selected]; t.mute = !t.mute; refreshAll() }
         soloBtn = btn("S") { val t = project.tracks[selected]; t.solo = !t.solo; refreshAll() }
         sel.addView(armBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44), 0f, dp(8)))
+        sel.addView(monBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44), 0f, dp(6)))
         sel.addView(muteBtn, lp(dp(48), dp(44), 0f, dp(6)))
         sel.addView(soloBtn, lp(dp(48), dp(44), 0f, dp(6)))
         sel.addView(btn("Import WAV") { pickWav() }, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44), 0f, dp(8)))
@@ -234,6 +260,7 @@ class MainActivity : Activity() {
         mixerRow.gravity = Gravity.TOP
         mixerRow.setPadding(dp(6), dp(6), dp(6), dp(6))
         for (i in 0 until Project.N) mixerRow.addView(strip(i), lp(dp(76), -1, 0f, if (i == 0) 0 else dp(4)))
+        mixerRow.addView(masterStrip(), lp(dp(92), -1, 0f, dp(10)))
         mixerScroll.addView(mixerRow, FrameLayout.LayoutParams(-2, -1))
         mixerScroll.isFillViewport = true
         body.addView(mixerScroll, FrameLayout.LayoutParams(-1, -1))
@@ -249,6 +276,30 @@ class MainActivity : Activity() {
         root.addView(bottom)
         setContentView(root)
         refreshAll()
+    }
+
+    /** MASTER: the fader for the whole mix (before the speakers / the export), the limiter, the output meter */
+    private fun masterStrip(): View {
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.gravity = Gravity.CENTER_HORIZONTAL
+        col.background = bg(C.PANEL2, 12, C.ORANGE)
+        col.setPadding(dp(4), dp(6), dp(4), dp(6))
+        col.addView(text("MASTER", 13f, C.ORANGE, true).also { it.gravity = Gravity.CENTER })
+        limBtn = btn("LIMIT", 12f) {
+            engine.limiter = !engine.limiter
+            prefs.edit().putBoolean("limiter", engine.limiter).apply()
+            refreshAll()
+        }
+        limBtn.setPadding(0, 0, 0, 0)
+        col.addView(limBtn, LinearLayout.LayoutParams(-1, dp(34)).also { it.topMargin = dp(4) })
+        masterFader = FaderView(this, C.ORANGE) { v ->
+            engine.masterGain = v
+            prefs.edit().putFloat("master", v).apply()
+        }
+        masterFader.value = engine.masterGain
+        col.addView(masterFader, LinearLayout.LayoutParams(-1, 0, 1f).also { it.topMargin = dp(8) })
+        return col
     }
 
     /** one mixer strip: number, name, ARM, M, S, PAN, the fader with its meter */
@@ -305,6 +356,8 @@ class MainActivity : Activity() {
             val (a, m, s) = stripBtns[i]
             lit(a, t.armed, C.RED); lit(m, t.mute, C.DIM); lit(s, t.solo, C.YELLOW)
         }
+        masterFader.value = engine.masterGain
+        lit(limBtn, engine.limiter, C.ORANGE)
         paint()
         timeline.invalidate()
     }
@@ -314,6 +367,7 @@ class MainActivity : Activity() {
         selName.text = "${selected + 1}  ${t.name}"
         selName.setTextColor(C.TRACK[selected])
         lit(armBtn, t.armed, C.RED)
+        lit(monBtn, engine.monitor, C.YELLOW)
         lit(muteBtn, t.mute, C.DIM)
         lit(soloBtn, t.solo, C.YELLOW)
         lit(clickBtn, engine.metronome, C.BLUE)
@@ -341,9 +395,16 @@ class MainActivity : Activity() {
                 t.peak *= 0.85f
             }
             val ip = engine.inputPeak
-            inMeter.background = bg(if (ip > 0.95f) C.RED else if (ip > 0.02f) C.GREEN else C.PANEL2, 3)
+            inMeter.background = bg(if (engine.inputClip || ip > 0.95f) C.RED else if (ip > 0.02f) C.GREEN else C.PANEL2, 3)
             engine.inputPeak *= 0.8f
-            engine.masterPeak *= 0.85f
+            outMeter.l = engine.peakL
+            outMeter.r = engine.peakR
+            outMeter.invalidate()
+            masterFader.meter = maxOf(engine.peakL, engine.peakR)
+            if (showMixer) masterFader.invalidate()
+            engine.peakL *= 0.85f
+            engine.peakR *= 0.85f
+            routeText.text = "OUT: " + routeName(engine.outRoute ?: defaultOut()) + "   IN: " + (engine.input?.let { devName(it) } ?: "Built-in mic")
             ui.postDelayed(this, 40)
         }
     }
@@ -384,6 +445,7 @@ class MainActivity : Activity() {
 
     private fun startRec() {
         if (busy) return
+        engine.inputClip = false
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
             return
@@ -484,26 +546,41 @@ class MainActivity : Activity() {
             }.setNegativeButton("Cancel", null).show()
     }
 
+    /** Settings: everything about the sound in and out, in one scrolling page */
     private fun settings() {
         val am = getSystemService(AUDIO_SERVICE) as AudioManager
         val ins = am.getDevices(AudioManager.GET_DEVICES_INPUTS).toList()
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
         col.setPadding(dp(20), dp(10), dp(20), dp(10))
-        val lat = text("", 15f, C.TEXT, true)
-        col.addView(text("Recording offset: moves each take earlier to make up for the delay of this device.", 13f, C.DIM))
-        col.addView(lat)
-        val sb = SeekBar(this)
-        sb.max = 400
-        sb.progress = engine.latencyMs
-        lat.text = "${engine.latencyMs} ms"
-        sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) { lat.text = "$v ms" }
-            override fun onStartTrackingTouch(s: SeekBar?) {}
-            override fun onStopTrackingTouch(s: SeekBar?) {}
-        })
-        col.addView(sb)
-        col.addView(text("Input", 15f, C.TEXT, true).also { it.setPadding(0, dp(14), 0, 0) })
+        fun head(t: String) = col.addView(text(t, 15f, C.ORANGE, true).also { it.setPadding(0, dp(16), 0, dp(2)) })
+        fun note(t: String) = col.addView(text(t, 12f, C.DIM))
+        fun slider(max: Int, v: Int, label: (Int) -> String): SeekBar {
+            val tv = text(label(v), 14f, C.TEXT, true)
+            col.addView(tv)
+            val sb = SeekBar(this)
+            sb.max = max
+            sb.progress = v
+            sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, x: Int, u: Boolean) { tv.text = label(x) }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+            col.addView(sb)
+            return sb
+        }
+        fun toggle(label: String, on: Boolean, color: Int = C.ORANGE): () -> Boolean {
+            var v = on
+            lateinit var b: Button
+            b = btn(label, 13f) { v = !v; lit(b, v, color) }
+            lit(b, v, color)
+            col.addView(b, LinearLayout.LayoutParams(-1, dp(44)).also { it.topMargin = dp(4) })
+            return { v }
+        }
+
+        // --- INPUT
+        head("INPUT")
+        note("Where the sound comes from. A mic or a cable in the 3.5 mm jack shows as Headset; an audio interface as USB.")
         val names = listOf("Default (built-in mic)") + ins.map { devName(it) }
         var pick = ins.indexOfFirst { it.id == engine.input?.id } + 1
         val list = LinearLayout(this)
@@ -518,26 +595,184 @@ class MainActivity : Activity() {
         }
         paintList()
         col.addView(list)
+        note("Channel (for a stereo input such as a 2-input USB interface):")
+        var ch = engine.inputChannel
+        val chRow = row()
+        val chBtns = ArrayList<Button>()
+        listOf("MIX", "LEFT / 1", "RIGHT / 2").forEachIndexed { k, n ->
+            val b = btn(n, 13f) { ch = k; chBtns.forEachIndexed { j, x -> lit(x, j == ch, C.ORANGE) } }
+            chBtns.add(b)
+            chRow.addView(b, lp(0, dp(44), 1f, if (k == 0) 0 else dp(4)))
+        }
+        chBtns.forEachIndexed { j, x -> lit(x, j == ch, C.ORANGE) }
+        col.addView(chRow)
+        val gain = slider(48, (engine.inputGainDb + 24).toInt()) { "Input gain: ${if (it >= 24) "+" else ""}${it - 24} dB" }
+        note("Turn it down if the input light goes red while you play.")
+        val raw = toggle("RAW INPUT (no phone voice processing)", engine.raw)
+        note("On: the cleanest sound for instruments. Off: the phone's own noise reduction (for speech).")
+
+        // --- TIMING
+        head("TIMING (where a take lands)")
+        val auto = toggle("AUTO ALIGN (from the device's own timing)", engine.autoAlign, C.GREEN)
+        note("Auto measures the real delay of the speaker and the input on every take. Off: the manual offset below.")
+        val lat = slider(400, engine.latencyMs) { "Manual offset: $it ms" }
+        val fine = slider(200, engine.fineMs + 100) { "Fine adjust: ${if (it >= 100) "+" else ""}${it - 100} ms (later +, earlier -)" }
+        if (engine.lastAlign.isNotEmpty()) note("Last take: ${engine.lastAlign}")
+        val calRes = text("", 13f, C.YELLOW)
+        val calBtn = btn("CALIBRATE", 14f) {}
+        calBtn.setOnClickListener {
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
+                return@setOnClickListener
+            }
+            if (engine.playing || engine.recording || busy) return@setOnClickListener
+            busy = true
+            calBtn.isEnabled = false
+            calRes.text = "Listening to 8 clicks... keep quiet"
+            Thread {
+                val r = engine.calibrate()
+                ui.post {
+                    busy = false
+                    calBtn.isEnabled = true
+                    if (r == null) calRes.text = "No clicks heard. Turn the volume up, or connect the output to the input with a cable, and try again."
+                    else {
+                        fine.progress = (engine.fineMs + 100).coerceIn(0, 200)
+                        prefs.edit().putInt("fine", engine.fineMs).apply()
+                        calRes.text = "Done: fine adjust set to ${engine.fineMs} ms"
+                    }
+                }
+            }.start()
+        }
+        col.addView(calBtn, LinearLayout.LayoutParams(-1, dp(48)).also { it.topMargin = dp(8) })
+        note("Calibrate plays clicks and records them, then sets the fine adjust. The input must hear the output: the phone's speaker to its mic, or a cable from the output to the input.")
+        col.addView(calRes)
+
+        // --- OUTPUT
+        head("OUTPUT")
+        val lim = toggle("LIMITER on the master (no clipping)", engine.limiter)
+        note("Now: " + routeName(engine.outRoute ?: defaultOut()) +
+            "   Buffer: ${engine.bufferFrames} frames (${engine.bufferFrames * 1000 / maxOf(1, project.rate)} ms)   Dropouts: ${engine.underruns}")
+        note("Speaker, 3.5 mm (to headphones or to a speaker / mixer with a cable), Bluetooth or USB: the phone picks the newest one plugged in. Bluetooth adds a big delay: use a cable for recording.")
+
         val sv = android.widget.ScrollView(this)
         sv.addView(col)
         AlertDialog.Builder(this).setTitle("Settings").setView(sv)
             .setPositiveButton("OK") { _, _ ->
-                engine.latencyMs = sb.progress
-                prefs.edit().putInt("latency", sb.progress).apply()
                 engine.input = if (pick <= 0) null else ins[pick - 1]
+                engine.inputChannel = ch
+                engine.inputGainDb = (gain.progress - 24).toFloat()
+                engine.raw = raw()
+                engine.autoAlign = auto()
+                engine.latencyMs = lat.progress
+                engine.fineMs = fine.progress - 100
+                engine.limiter = lim()
+                prefs.edit().putInt("inDev", engine.input?.id ?: -1).putInt("inCh", ch)
+                    .putFloat("inGain", engine.inputGainDb).putBoolean("raw", engine.raw)
+                    .putBoolean("autoAlign", engine.autoAlign).putInt("latency", engine.latencyMs)
+                    .putInt("fine", engine.fineMs).putBoolean("limiter", engine.limiter).apply()
+                refreshAll()
             }.setNegativeButton("Cancel", null).show()
     }
 
     private fun devName(dv: AudioDeviceInfo): String {
         val kind = when (dv.type) {
             AudioDeviceInfo.TYPE_BUILTIN_MIC -> "Built-in mic"
-            AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET -> "USB"
-            AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Headset"
+            AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_ACCESSORY -> "USB"
+            AudioDeviceInfo.TYPE_WIRED_HEADSET -> "3.5 mm (Headset)"
+            AudioDeviceInfo.TYPE_LINE_ANALOG -> "Line in"
             AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth"
             else -> "Input"
         }
         return "$kind: ${dv.productName}"
     }
+
+    /** the output the phone uses now when nothing is playing (the newest one plugged in) */
+    private fun defaultOut(): AudioDeviceInfo? {
+        val outs = (getSystemService(AUDIO_SERVICE) as AudioManager).getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        val order = intArrayOf(AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+            AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_LINE_ANALOG, AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+        for (t in order) outs.firstOrNull { it.type == t }?.let { return it }
+        return null
+    }
+
+    private fun routeKind(dv: AudioDeviceInfo?): Int = when (dv?.type) {
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_LINE_ANALOG -> 1
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> 2
+        AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_ACCESSORY -> 3
+        else -> 0
+    }
+
+    private fun routeName(dv: AudioDeviceInfo?): String = when (routeKind(dv)) {
+        1 -> "3.5 mm"
+        2 -> "Bluetooth (delay!)"
+        3 -> "USB"
+        else -> "Speaker"
+    }
+
+    /** MON: hear the input while recording. A mic with the sound going to a speaker howls: ask first. */
+    private fun toggleMonitor() {
+        if (engine.monitor) {
+            engine.monitor = false
+            paint()
+            return
+        }
+        val out = routeKind(engine.outRoute ?: defaultOut())
+        val inKind = engine.input?.type
+        val mic = inKind == null || inKind == AudioDeviceInfo.TYPE_BUILTIN_MIC
+        val warn = when {
+            out == 2 -> "The output is Bluetooth: you will hear yourself late (a big delay). Use wired headphones to monitor."
+            mic && out == 0 -> "The sound goes to the phone's speaker and the mic hears it: it can howl (feedback). Plug in headphones first."
+            out == 1 && mic -> "If the 3.5 mm output goes to a speaker in the same room as the mic, it can howl (feedback). With headphones it is fine."
+            else -> null
+        }
+        if (warn == null) {
+            engine.monitor = true
+            paint()
+            return
+        }
+        AlertDialog.Builder(this).setTitle("Monitor").setMessage(warn)
+            .setPositiveButton("Monitor anyway") { _, _ -> engine.monitor = true; paint() }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    /** a device plugged in or out: USB -> how to let the app have it; Bluetooth -> the delay */
+    private val devices = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) {
+            if (!started) { started = true; return }        // (the first call lists what was already there)
+            val usb = added.any { routeKind(it) == 3 }
+            val bt = added.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP && it.isSink }
+            if (usb && !usbHintShown) {
+                usbHintShown = true
+                AlertDialog.Builder(this@MainActivity).setTitle("USB audio connected")
+                    .setMessage("If the USB device is a sound card / interface, pick it as the input in Settings.\n\n" +
+                        "If the phone sends all its sound to USB and you don't want that (for example while charging or " +
+                        "connecting another device), turn on \"Disable USB audio routing\" in Developer options. " +
+                        "(Developer options: Settings > About phone > tap Build number 7 times.)")
+                    .setPositiveButton("Developer options") { _, _ ->
+                        try { startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) }
+                        catch (e: Exception) { toast("Developer options are not turned on yet") }
+                    }
+                    .setNeutralButton("Settings") { _, _ -> settings() }
+                    .setNegativeButton("OK", null).show()
+            }
+            if (bt) toast("Bluetooth output: it adds a delay. Use a cable or the phone's jack for recording.")
+            if (engine.monitor && routeKind(defaultOut()) == 0) engine.monitor = false
+            paint()
+        }
+
+        override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) {
+            if (engine.input != null && removed.any { it.id == engine.input?.id }) {
+                engine.input = null
+                toast("The input was unplugged: back to the built-in mic")
+            }
+            if (engine.monitor && routeKind(defaultOut()) == 0) {      // headphones out, the speaker now: no howl
+                engine.monitor = false
+                toast("Monitor off (headphones unplugged)")
+            }
+            paint()
+        }
+    }
+    private var started = false
 
     // ---------------- import / export ----------------
 
