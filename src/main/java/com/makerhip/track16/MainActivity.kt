@@ -37,7 +37,17 @@ class MainActivity : Activity() {
     lateinit var project: Project
     lateinit var engine: Engine
     var selected = 0
-    private val ui = Handler(Looper.getMainLooper())
+    val ui = Handler(Looper.getMainLooper())
+    lateinit var midi: MidiControl
+    private lateinit var midiBtn: Button
+    private lateinit var learnBtn: Button
+    private lateinit var clockBtn: Button
+    private lateinit var thruBtn: Button
+    private lateinit var midiText: TextView
+    private lateinit var mixerPane: LinearLayout
+    private val midiLabels = ArrayList<TextView>()
+    private lateinit var masterLabel: TextView
+    private var midiDialog: AlertDialog? = null
     private lateinit var timeline: TimelineView
     private lateinit var mixerScroll: HorizontalScrollView
     private lateinit var mixerRow: LinearLayout
@@ -89,7 +99,9 @@ class MainActivity : Activity() {
         val inId = prefs.getInt("inDev", -1)
         engine.input = am.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.id == inId }
         am.registerAudioDeviceCallback(devices, ui)
+        midi = MidiControl(this, prefs)
         build()
+        reconnectBt()
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
         ui.post(tick)
@@ -103,6 +115,8 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         (getSystemService(AUDIO_SERVICE) as AudioManager).unregisterAudioDeviceCallback(devices)
+        midi.hub.clockStop(midi.hub.clocking)
+        midi.hub.closeAll()
         ui.removeCallbacksAndMessages(null)
         if (engine.playing) engine.stop()
     }
@@ -195,13 +209,13 @@ class MainActivity : Activity() {
         val head = row()
         head.setBackgroundColor(C.PANEL)
         head.setPadding(dp(10), dp(6), dp(10), dp(6))
-        playBtn = btn("▶", 30f) { if (engine.playing) stopAll() else startPlay() }
+        playBtn = btn("▶", 30f) { if (!midi.learnTap("play")) { if (engine.playing) stopAll() else startPlay() } }
         playBtn.setPadding(0, 0, 0, 0)
         head.addView(playBtn, lp(dp(72), dp(72)))
-        recBtn = btn("●", 28f) { if (engine.recording) stopAll() else startRec() }
+        recBtn = btn("●", 28f) { if (!midi.learnTap("rec")) { if (engine.recording) stopAll() else startRec() } }
         recBtn.setPadding(0, 0, 0, 0)
         head.addView(recBtn, lp(dp(64), dp(64), 0f, dp(8)))
-        head.addView(btn("|◀", 18f) { seek(0) }, lp(dp(52), dp(52), 0f, dp(8)))
+        head.addView(btn("|◀", 18f) { if (!midi.learnTap("rtz")) seek(0) }, lp(dp(52), dp(52), 0f, dp(8)))
         val tc = LinearLayout(this)
         tc.orientation = LinearLayout.VERTICAL
         titleText = text(project.title, 12f, C.DIM, true)
@@ -263,7 +277,11 @@ class MainActivity : Activity() {
         mixerRow.addView(masterStrip(), lp(dp(92), -1, 0f, dp(10)))
         mixerScroll.addView(mixerRow, FrameLayout.LayoutParams(-2, -1))
         mixerScroll.isFillViewport = true
-        body.addView(mixerScroll, FrameLayout.LayoutParams(-1, -1))
+        mixerPane = LinearLayout(this)
+        mixerPane.orientation = LinearLayout.VERTICAL
+        mixerPane.addView(midiBar(), LinearLayout.LayoutParams(-1, -2))
+        mixerPane.addView(mixerScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        body.addView(mixerPane, FrameLayout.LayoutParams(-1, -1))
         root.addView(body, lp(-1, 0, 1f))
 
         // zoom
@@ -294,11 +312,12 @@ class MainActivity : Activity() {
         limBtn.setPadding(0, 0, 0, 0)
         col.addView(limBtn, LinearLayout.LayoutParams(-1, dp(34)).also { it.topMargin = dp(4) })
         masterFader = FaderView(this, C.ORANGE) { v ->
-            engine.masterGain = v
-            prefs.edit().putFloat("master", v).apply()
+            if (!midi.learnTap("master")) setMaster(v)
         }
         masterFader.value = engine.masterGain
         col.addView(masterFader, LinearLayout.LayoutParams(-1, 0, 1f).also { it.topMargin = dp(8) })
+        masterLabel = text("", 10f, C.YELLOW).also { it.gravity = Gravity.CENTER }
+        col.addView(masterLabel, LinearLayout.LayoutParams(-1, -2))
         return col
     }
 
@@ -313,9 +332,9 @@ class MainActivity : Activity() {
         num.gravity = Gravity.CENTER
         num.setOnClickListener { selectTrack(i) }
         col.addView(num)
-        val a = btn("R", 12f) { toggleArm(i) }
-        val m = btn("M", 12f) { val t = project.tracks[i]; t.mute = !t.mute; refreshAll() }
-        val s = btn("S", 12f) { val t = project.tracks[i]; t.solo = !t.solo; refreshAll() }
+        val a = btn("R", 12f) { if (!midi.learnTap("arm:$i")) toggleArm(i) }
+        val m = btn("M", 12f) { if (!midi.learnTap("mute:$i")) { val t = project.tracks[i]; t.mute = !t.mute; refreshAll() } }
+        val s = btn("S", 12f) { if (!midi.learnTap("solo:$i")) { val t = project.tracks[i]; t.solo = !t.solo; refreshAll() } }
         for (b in listOf(a, m, s)) {
             b.setPadding(0, 0, 0, 0)
             col.addView(b, LinearLayout.LayoutParams(-1, dp(34)).also { it.topMargin = dp(4) })
@@ -329,15 +348,18 @@ class MainActivity : Activity() {
             override fun onProgressChanged(sb: SeekBar?, v: Int, user: Boolean) {
                 if (user) project.tracks[i].pan = if (kotlin.math.abs(v - 100) < 6) 0f else v / 100f - 1f
             }
-            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStartTrackingTouch(sb: SeekBar?) { midi.learnTap("pan:$i") }
             override fun onStopTrackingTouch(sb: SeekBar?) {}
         })
         pan.tag = "pan$i"
         col.addView(pan, LinearLayout.LayoutParams(-1, dp(30)))
-        val f = FaderView(this, C.TRACK[i]) { v -> project.tracks[i].gain = v }
+        val f = FaderView(this, C.TRACK[i]) { v -> midi.learnTap("fader:$i"); project.tracks[i].gain = v }
         f.value = project.tracks[i].gain
         faders.add(f)
         col.addView(f, LinearLayout.LayoutParams(-1, 0, 1f))
+        val ml = text("", 10f, C.YELLOW).also { it.gravity = Gravity.CENTER }
+        midiLabels.add(ml)
+        col.addView(ml, LinearLayout.LayoutParams(-1, -2))
         return col
     }
 
@@ -347,7 +369,7 @@ class MainActivity : Activity() {
         titleText.text = project.title
         bpmText.text = " ${project.bpm} BPM "
         timeline.visibility = if (showMixer) View.GONE else View.VISIBLE
-        mixerScroll.visibility = if (showMixer) View.VISIBLE else View.GONE
+        mixerPane.visibility = if (showMixer) View.VISIBLE else View.GONE
         viewBtn.text = if (showMixer) "TRACKS" else "MIXER"
         for (i in 0 until Project.N) {
             val t = project.tracks[i]
@@ -358,6 +380,7 @@ class MainActivity : Activity() {
         }
         masterFader.value = engine.masterGain
         lit(limBtn, engine.limiter, C.ORANGE)
+        midiLabelsPaint()
         paint()
         timeline.invalidate()
     }
@@ -405,6 +428,7 @@ class MainActivity : Activity() {
             engine.peakL *= 0.85f
             engine.peakR *= 0.85f
             routeText.text = "OUT: " + routeName(engine.outRoute ?: defaultOut()) + "   IN: " + (engine.input?.let { devName(it) } ?: "Built-in mic")
+            midiTick()
             ui.postDelayed(this, 40)
         }
     }
@@ -475,6 +499,185 @@ class MainActivity : Activity() {
             }
         }.start()
         paint()
+    }
+
+    // ---------------- MIDI (the MIXER page) ----------------
+
+    fun setMaster(v: Float) {
+        engine.masterGain = v.coerceIn(0f, 1.2f)
+        prefs.edit().putFloat("master", engine.masterGain).apply()
+    }
+
+    fun midiArm(i: Int) = toggleArm(i)
+    fun midiPlay() { if (engine.playing) stopAll() else startPlay() }
+    fun midiRec() { if (engine.recording) stopAll() else startRec() }
+    fun midiStop() { if (engine.playing) stopAll() }
+
+    /** the bar above the strips: MIDI (devices), LEARN, CLOCK, THRU, what is connected */
+    private fun midiBar(): View {
+        val r = row()
+        r.setPadding(dp(8), dp(6), dp(8), 0)
+        midiBtn = btn("MIDI", 13f) { midiDialog() }
+        learnBtn = btn("LEARN", 13f) {
+            midi.learn = !midi.learn
+            midi.pending = null
+            midiChanged()
+        }
+        learnBtn.setOnLongClickListener {
+            AlertDialog.Builder(this).setTitle("Clear MIDI LEARN?")
+                .setMessage("Every control learned is forgotten (the SMC-Mixer's own layout stays).")
+                .setPositiveButton("Clear all") { _, _ -> midi.clearAll(); midiChanged() }
+                .setNegativeButton("Cancel", null).show()
+            true
+        }
+        clockBtn = btn("CLOCK", 13f) {
+            midi.clockOn = !midi.clockOn
+            midi.saveFlags()
+            if (!midi.clockOn && midi.hub.clocking) midi.hub.clockStop()
+            midiChanged()
+        }
+        thruBtn = btn("THRU", 13f) { midi.thruOn = !midi.thruOn; midi.saveFlags(); midiChanged() }
+        midiText = text("", 12f, C.DIM)
+        r.addView(midiBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40)))
+        r.addView(learnBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40), 0f, dp(6)))
+        r.addView(clockBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40), 0f, dp(6)))
+        r.addView(thruBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40), 0f, dp(6)))
+        r.addView(midiText, lp(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f, dp(12)))
+        return r
+    }
+
+    /** the MIDI state changed (a device, LEARN, CLOCK, THRU, the SMC bank): the bar, the labels, the dialog */
+    fun midiChanged() {
+        if (!::midiText.isInitialized) return
+        val cs = midi.hub.conns
+        lit(midiBtn, cs.isNotEmpty(), C.BLUE)
+        lit(learnBtn, midi.learn, C.YELLOW)
+        lit(clockBtn, midi.clockOn, C.GREEN)
+        lit(thruBtn, midi.thruOn, C.GREEN)
+        midiText.text = when {
+            midi.learn && midi.pending != null -> "LEARN: now move a knob, fader or button on the controller (" + targetName(midi.pending!!) + ")"
+            midi.learn -> "LEARN: tap a fader, PAN, R / M / S, MASTER or PLAY / REC, then move the controller. Hold LEARN to clear all."
+            cs.isEmpty() -> if (midi.hub.available) "No MIDI device. Tap MIDI to connect Bluetooth; USB connects by itself." else "This device has no MIDI."
+            else -> cs.joinToString("   ") { (if (it.bt) "BT: " else "USB: ") + it.name + if (it.smc) " (tracks ${midi.bank * 8 + 1}-${midi.bank * 8 + 8})" else "" }
+        }
+        midiText.setTextColor(if (midi.learn) C.YELLOW else C.DIM)
+        midiLabelsPaint()
+        if (midiDialog?.isShowing == true) fillMidiDialog()
+    }
+
+    private fun targetName(t: String): String = when {
+        t == "master" -> "MASTER"
+        t == "play" -> "PLAY"
+        t == "rec" -> "REC"
+        t == "rtz" -> "to the start"
+        else -> t.substringBefore(':').let { if (it == "arm") "R" else it.uppercase() } + " " + (t.substringAfter(':').toInt() + 1)
+    }
+
+    private fun midiLabelsPaint() {
+        if (midiLabels.size < Project.N) return
+        val p = midi.pending
+        for (i in 0 until Project.N) {
+            val parts = listOf("fader", "pan", "arm", "mute", "solo").mapNotNull { k ->
+                val l = midi.label("$k:$i")
+                if (l.isEmpty()) null else (if (k == "fader") "" else (if (k == "arm") "R " else k[0].uppercase() + " ")) + l
+            }
+            midiLabels[i].text = if (p != null && p.endsWith(":$i")) "◉ ${targetName(p)}" else parts.joinToString("\n")
+        }
+        masterLabel.text = if (p == "master") "◉ MASTER" else midi.label("master")
+        val strips = mixerRow
+        for (i in 0 until Project.N) {
+            val sel = p != null && p.endsWith(":$i")
+            val smc = midi.hub.conns.any { it.smc } && i / 8 == midi.bank
+            strips.getChildAt(i).background = bg(C.PANEL, 12, if (sel) C.YELLOW else if (smc) C.BLUE else 0)
+        }
+    }
+
+    private fun midiTick() {
+        midi.feedback()
+        if (midi.clockOn && engine.playing && !midi.hub.clocking && midi.hub.conns.isNotEmpty()) {
+            val q = maxOf(1, engine.beatSamples() / 4)
+            midi.hub.clockStart({ project.bpm }, maxOf(0, engine.pos) / q)
+        } else if (midi.hub.clocking && (!engine.playing || !midi.clockOn)) {
+            midi.hub.clockStop()
+        }
+    }
+
+    private fun btPerms(): Array<String> =
+        if (Build.VERSION.SDK_INT >= 31) arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+
+    private fun hasBtPerms() = btPerms().all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
+
+    private fun reconnectBt() {
+        val a = prefs.getString("midiBt", null) ?: return
+        if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return
+        try { midi.hub.connectBt(a) } catch (_: Exception) {}
+    }
+
+    private fun scanBt() {
+        if (!hasBtPerms()) { requestPermissions(btPerms(), 2); return }
+        when (val r = try { midi.hub.startScan() } catch (e: SecurityException) { "Bluetooth permission needed" }) {
+            null -> {}
+            "off" -> try { startActivity(Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE)) } catch (e: Exception) { toast("Turn Bluetooth on first") }
+            else -> toast(r)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 2) {
+            if (hasBtPerms()) scanBt() else toast("Bluetooth MIDI needs the Nearby devices permission")
+        }
+    }
+
+    private lateinit var midiList: LinearLayout
+
+    private fun midiDialog() {
+        if (midi.learn) { midi.learn = false; midi.pending = null }
+        midiList = LinearLayout(this)
+        midiList.orientation = LinearLayout.VERTICAL
+        midiList.setPadding(dp(20), dp(8), dp(20), dp(8))
+        val sv = android.widget.ScrollView(this)
+        sv.addView(midiList)
+        midiDialog = AlertDialog.Builder(this).setTitle("MIDI devices").setView(sv)
+            .setPositiveButton("Done", null)
+            .setOnDismissListener { midi.hub.stopScan() }.show()
+        fillMidiDialog()
+        if (midi.hub.conns.none { it.bt } && hasBtPerms()) scanBt()
+    }
+
+    private fun fillMidiDialog() {
+        val l = midiList
+        l.removeAllViews()
+        l.addView(text("CONNECTED", 13f, C.ORANGE, true))
+        if (midi.hub.conns.isEmpty()) l.addView(text("Nothing yet.", 13f, C.DIM))
+        for (c in ArrayList(midi.hub.conns)) {
+            val b = btn((if (c.bt) "BT  " else "USB  ") + c.name + "   (tap to disconnect)", 13f) {
+                if (c.bt) prefs.edit().remove("midiBt").apply()
+                midi.forgetConn(c)
+                midi.hub.close(c)
+            }
+            lit(b, true, C.BLUE)
+            l.addView(b, LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(4) })
+        }
+        l.addView(text("BLUETOOTH", 13f, C.ORANGE, true).also { it.setPadding(0, dp(14), 0, 0) })
+        val sb = btn(if (midi.hub.scanning) "Searching..." else "SEARCH FOR BLUETOOTH MIDI", 13f) { scanBt() }
+        sb.isEnabled = !midi.hub.scanning
+        l.addView(sb, LinearLayout.LayoutParams(-1, dp(46)).also { it.topMargin = dp(4) })
+        val ids = midi.hub.conns.map { it.name }
+        for ((addr, nd) in midi.hub.found) {
+            if (nd.first in ids) continue
+            val b = btn(nd.first + "   (tap to connect)", 13f) {
+                prefs.edit().putString("midiBt", addr).apply()
+                midi.hub.stopScan()
+                try { midi.hub.connectBt(nd.second) } catch (e: SecurityException) { toast("Bluetooth permission needed") }
+                toast("Connecting to ${nd.first}...")
+            }
+            l.addView(b, LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(4) })
+        }
+        l.addView(text("Turn the device on (an SMC-Mixer: its DAW mode for the built-in layout, or CC mode for LEARN). " +
+            "Bluetooth MIDI devices are found here, not in the phone's Bluetooth settings. A USB MIDI device (the FM-1 " +
+            "with an OTG cable) connects by itself.", 12f, C.DIM).also { it.setPadding(0, dp(12), 0, 0) })
     }
 
     private fun clearTrack() {
