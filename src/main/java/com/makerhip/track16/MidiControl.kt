@@ -215,10 +215,10 @@ class MidiControl(private val a: MainActivity, private val prefs: SharedPreferen
                     n == 0x5D -> a.midiStop()
                     n == 0x5E -> a.midiPlay()
                     n == 0x5F -> a.midiRec()
-                    n == 0x2E -> setBank(0)
-                    n == 0x2F -> setBank(1)
-                    n == 0x30 -> a.selectTrack(maxOf(0, a.selected - 1)).also { setBank(a.selected / 8) }
-                    n == 0x31 -> a.selectTrack(minOf(Project.N - 1, a.selected + 1)).also { setBank(a.selected / 8) }
+                    n == 0x2E -> switchBank(0)
+                    n == 0x2F -> switchBank(1)
+                    n == 0x30 -> a.selectTrack(maxOf(0, a.selected - 1)).also { switchBank(a.selected / 8) }
+                    n == 0x31 -> a.selectTrack(minOf(Project.N - 1, a.selected + 1)).also { switchBank(a.selected / 8) }
                     else -> return false
                 }
             }
@@ -229,7 +229,7 @@ class MidiControl(private val a: MainActivity, private val prefs: SharedPreferen
         return true
     }
 
-    private fun setBank(b: Int) {
+    private fun switchBank(b: Int) {
         if (b == bank) return
         bank = b
         for (i in 0 until 8) { picked[i] = false; lastPos[i] = -1f }
