@@ -50,6 +50,7 @@ class MainActivity : Activity() {
     private var eqRefresh: (() -> Unit)? = null
     private lateinit var masterLabel: TextView
     private var midiDialog: AlertDialog? = null
+    private lateinit var inboxBtn: Button
     private lateinit var timeline: TimelineView
     private lateinit var mixerScroll: HorizontalScrollView
     private lateinit var mixerRow: LinearLayout
@@ -107,6 +108,11 @@ class MainActivity : Activity() {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
         ui.post(tick)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        checkInbox()
     }
 
     override fun onPause() {
@@ -250,6 +256,9 @@ class MainActivity : Activity() {
         right.addView(clickBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48), 0f, dp(8)))
         countBtn = btn("Count-in") { engine.countIn = !engine.countIn; prefs.edit().putBoolean("countIn", engine.countIn).apply(); paint() }
         right.addView(countBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48), 0f, dp(6)))
+        inboxBtn = btn("INBOX", 14f) { inboxDialog() }
+        inboxBtn.visibility = View.GONE
+        right.addView(inboxBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48), 0f, dp(8)))
         right.addView(btn("☰", 18f) { menu() }, lp(dp(52), dp(48), 0f, dp(6)))
         root.addView(head)
 
@@ -773,6 +782,95 @@ class MainActivity : Activity() {
     private fun midHzOf(p: Int): Int = (200 * Math.pow(25.0, p / 100.0)).toInt().let { f ->
         if (f >= 1000) (f + 50) / 100 * 100 else (f + 5) / 10 * 10 }.coerceIn(200, 5000)
 
+    // ---------------- the Maker Hip INBOX (INBOX.md): boxes of stems from Burger Studio ----------------
+
+    /** the INBOX button shows when Burger Studio holds boxes for us */
+    private fun checkInbox() {
+        Thread {
+            val n = Inbox.boxes(this).size
+            ui.post {
+                if (!::inboxBtn.isInitialized) return@post
+                inboxBtn.visibility = if (n > 0) View.VISIBLE else View.GONE
+                inboxBtn.text = "INBOX $n"
+                lit(inboxBtn, n > 0, C.PINK)
+            }
+        }.start()
+    }
+
+    private fun inboxDialog() {
+        Thread {
+            val boxes = Inbox.boxes(this)
+            ui.post {
+                if (boxes.isEmpty()) { toast("The inbox is empty"); checkInbox(); return@post }
+                val items = boxes.map { b ->
+                    "${b.title}\n   ${b.tracks} tracks · ${b.bars} bars · ${b.bpm} BPM ${b.meter}  ·  " +
+                        java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(b.created))
+                }.toTypedArray()
+                AlertDialog.Builder(this).setTitle("INBOX · from Burger Studio")
+                    .setItems(items) { _, w -> boxDialog(boxes[w]) }
+                    .setNegativeButton("Close", null).show()
+            }
+        }.start()
+    }
+
+    private fun boxDialog(b: Inbox.Box) {
+        Thread {
+            val stems = Inbox.stems(this, b)
+            ui.post {
+                val list = stems.take(Project.N).joinToString("\n") { "${it.idx + 1}.  ${it.name}" } +
+                    if (stems.size > Project.N) "\n\n${stems.size - Project.N} more left out (16 tracks at most)" else ""
+                AlertDialog.Builder(this).setTitle(b.title)
+                    .setMessage("$list\n\nSPLIT puts each stem on its own track (name, fader, pan) and sets ${b.bpm} BPM.")
+                    .setPositiveButton("SPLIT → new song") { _, _ -> split(b, stems, true) }
+                    .setNeutralButton("SPLIT → this song") { _, _ ->
+                        AlertDialog.Builder(this).setTitle("Replace tracks 1-${minOf(stems.size, Project.N)} of ${project.title}?")
+                            .setMessage("Their audio is replaced by the stems.")
+                            .setPositiveButton("Replace") { _, _ -> split(b, stems, false) }
+                            .setNegativeButton("Cancel", null).show()
+                    }
+                    .setNegativeButton("Cancel", null).show()
+            }
+        }.start()
+    }
+
+    private fun split(b: Inbox.Box, stems: List<Inbox.Stem>, newSong: Boolean) {
+        if (busy || engine.playing) { toast("Stop first"); return }
+        if (newSong) {
+            val base = b.title.replace(Regex("[^\\p{L}\\p{N} ._-]"), "_").take(36).trim().ifBlank { "Inbox song" }
+            var name = base
+            var k = 2
+            while (File(projectsDir(), name).exists()) name = "$base ${k++}"
+            switchTo(name)
+        }
+        busy = true
+        toast("Splitting ${stems.size} stems...")
+        val p = project
+        Thread {
+            var done = 0
+            for ((i, st) in stems.take(Project.N).withIndex()) {
+                val a = Inbox.audio(this, b, st, p.rate) ?: continue
+                p.clear(i)
+                p.write(i, 0, a, a.size)
+                val t = p.tracks[i]
+                t.name = st.name.ifBlank { "Track ${i + 1}" }
+                t.gain = st.gain.coerceIn(0f, 1.2f)
+                t.pan = st.pan.coerceIn(-1f, 1f)
+                t.mute = false; t.solo = false
+                done++
+            }
+            if (b.bpm in 30..300) p.bpm = b.bpm
+            p.save()
+            ui.post {
+                busy = false
+                refreshAll()
+                AlertDialog.Builder(this).setTitle("Split: $done of ${stems.size} stems")
+                    .setMessage("Remove \"${b.title}\" from the inbox?")
+                    .setPositiveButton("Remove") { _, _ -> Thread { Inbox.delete(this, b); ui.post { checkInbox() } }.start() }
+                    .setNegativeButton("Keep it") { _, _ -> checkInbox() }.show()
+            }
+        }.start()
+    }
+
     private fun clearTrack() {
         if (engine.playing) return
         AlertDialog.Builder(this).setTitle("Clear track ${selected + 1}?")
@@ -809,7 +907,8 @@ class MainActivity : Activity() {
                 4 -> settings()
                 5 -> AlertDialog.Builder(this).setTitle("16 Track Mixer Recorder")
                     .setMessage("Version ${packageManager.getPackageInfo(packageName, 0).versionName} · a Maker Hip app.\n\n" +
-                        "Record up to 16 tracks one at a time over each other, mix them, and export the mix and the stems as WAV.")
+                        "Record up to 16 tracks one at a time over each other, mix them, and export the mix and the stems as WAV.\n\n" +
+                        "INBOX: with Burger Studio installed, its → MIX boxes (a Q or a whole song, one stem per track) wait here; SPLIT puts them on the tracks.")
                     .setPositiveButton("OK", null).show()
             }
         }.show()
