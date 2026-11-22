@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTimestamp
 import android.media.AudioTrack
@@ -32,6 +33,12 @@ import kotlin.math.sin
  * pairs of them each recorded frame is placed at the song position that was being heard when it was played, so a take
  * lands in time by itself on any device and output (speaker, wired, USB, Bluetooth). When a device reports no
  * timestamps, the recording offset (Settings, or measured by Calibrate) is used. A fine offset is added either way.
+ *
+ * 0.10 CUE (headphones, like a DJ's): a track in CUE leaves the main mix and goes to a headphone mix (the CUE tracks +
+ * CUE MIX x the main mix, its own level). Where the headphone mix goes: channels 3-4 of a USB output with four or more
+ * (one 4-channel track), else a second AudioTrack on another, headphone-type output (written non-blocking: the main
+ * never waits for it), or the right side of a split cable (main left, both mono). With no headphone path the CUE
+ * tracks stay in the main. Export never looks at CUE.
  */
 class Engine(var project: Project) {
     @Volatile var playing = false
@@ -88,6 +95,24 @@ class Engine(var project: Project) {
     // the limiter
     private var limGain = 1f
 
+    // 0.10 CUE: the headphone mix
+    @Volatile var cueMix = 0.5f                    // how much of the main mix the headphones get (0 .. 1)
+    @Volatile var phonesGain = 1f                  // the headphones' own level (0 .. 1.2)
+    @Volatile var splitCable = false               // a Y split cable on the jack: left = main, right = headphones (mono)
+    @Volatile var splitSwap = false                // (the other way round)
+    @Volatile var audio: AudioManager? = null      // to find the outputs (MainActivity sets it)
+    @Volatile var cueState = 0                     // 0 none, 1 USB 3-4, 2 a second output, 3 split cable, 4 no headphone output
+    @Volatile var cueRoute: AudioDeviceInfo? = null   // the second output (state 2)
+    @Volatile private var phones: AudioTrack? = null  // the second track (the cue thread opens / closes it)
+    @Volatile private var cueFailed = false        // no distinct output: not tried again until no track is in CUE
+    @Volatile private var fourCh = false           // the main track has 4 channels and plays on the USB output
+    @Volatile private var mainRouteId = -1         // the main track's routed device (-1: not known yet)
+    @Volatile private var blocks = 0L              // blocks played (the cue thread waits on it before a release)
+    @Volatile private var playAlive = false
+    private val cueLock = Any()
+    private var cueRunning = false
+    private var limGainH = 1f                      // the headphones' limiter
+
     val rate get() = project.rate
 
     fun beatSamples(): Int = rate * 60 / project.bpm.coerceIn(30, 300)
@@ -95,9 +120,147 @@ class Engine(var project: Project) {
     fun play() {
         if (playing) return
         playing = true
-        val t = Thread({ playLoop() }, "play")
+        playAlive = true
+        cueFailed = false
+        val t = Thread({ try { playLoop() } finally { playAlive = false } }, "play")
         playThread = t
         t.start()
+        cueChanged()
+    }
+
+    // ---------------- 0.10 CUE ----------------
+
+    private fun anyCue(): Boolean {
+        for (t in project.tracks) if (t.cue) return true
+        return false
+    }
+
+    /** A CUE button moved (or PLAY): while playing with a track in CUE, a small thread looks after the second output. */
+    fun cueChanged() {
+        if (!playing || !anyCue()) return
+        synchronized(cueLock) {
+            if (cueRunning) return
+            cueRunning = true
+        }
+        Thread({ cueLoop() }, "cue").start()
+    }
+
+    /**
+     * Opens the second (headphone) track when a track is in CUE and there is no other headphone path, once; closes it
+     * when no track is in CUE (after a recording, never during one). Never on the play thread: opening takes time.
+     */
+    private fun cueLoop() {
+        var chosen = -1
+        var openedAt = 0L
+        var n = 0
+        while (true) {
+            val any = anyCue()
+            if (!playing || (!any && phones == null)) {
+                if (!playing) closePhones()
+                val done = synchronized(cueLock) {
+                    if (!playing || (!anyCue() && phones == null)) { cueRunning = false; true } else false
+                }
+                if (done) { if (!anyCue()) cueFailed = false; return }
+                continue
+            }
+            if (!any) cueFailed = false                  // (the next first track in CUE: one more try)
+            val cal = recording && recording4cal
+            val want = any && !splitCable && !fourCh && !cal
+            val ph = phones
+            if (ph == null) {
+                val mainId = mainRouteId
+                if (want && !cueFailed && mainId != -1) {
+                    val dev = phonesDevice(mainId)
+                    val t = if (dev != null) openPhones(dev) else null
+                    if (t != null && dev != null) {
+                        chosen = dev.id
+                        openedAt = System.nanoTime()
+                        cueRoute = dev
+                        phones = t
+                    } else cueFailed = true
+                }
+            } else if ((!want || cueFailed) && !recording) {
+                closePhones()
+            } else if (want && !cueFailed && ++n % 10 == 0 && System.nanoTime() - openedAt > 300_000_000L) {
+                // both on one device (the headphones unplugged, or the phone would not route it): give up
+                val rd = try { ph.routedDevice } catch (e: Exception) { null }
+                val mainId = mainRouteId
+                if (rd != null && (rd.id != chosen || (mainId != -1 && rd.id == mainId))) cueFailed = true
+            }
+            try { Thread.sleep(50) } catch (e: InterruptedException) {}
+        }
+    }
+
+    /** a headphone-type output that is not where the main track plays (null: none) */
+    private fun phonesDevice(mainId: Int): AudioDeviceInfo? {
+        val outs = try { audio?.getDevices(AudioManager.GET_DEVICES_OUTPUTS) } catch (e: Exception) { null } ?: return null
+        val order = intArrayOf(AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_WIRED_HEADSET,
+            AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
+        for (ty in order) for (d in outs) if (d.type == ty && d.id != mainId) return d
+        return null
+    }
+
+    private fun openPhones(dev: AudioDeviceInfo): AudioTrack? {
+        var t: AudioTrack? = null
+        try {
+            t = AudioTrack.Builder()
+                .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).build())
+                .setBufferSizeInBytes(maxOf(AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_STEREO,
+                    AudioFormat.ENCODING_PCM_FLOAT), burst * 8 * 4))
+                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                .build()
+            if (t.state != AudioTrack.STATE_INITIALIZED || !t.setPreferredDevice(dev)) { t.release(); return null }
+            t.play()
+            return t
+        } catch (e: Exception) {
+            try { t?.release() } catch (e2: Exception) {}
+            return null
+        }
+    }
+
+    /** the play thread lets go of it first (two blocks on), then it is released */
+    private fun closePhones() {
+        val ph = phones ?: return
+        phones = null
+        cueRoute = null
+        val b = blocks
+        val t0 = System.nanoTime()
+        while (playAlive && blocks - b < 2 && System.nanoTime() - t0 < 2_000_000_000L)
+            try { Thread.sleep(5) } catch (e: InterruptedException) {}
+        try { ph.pause(); ph.flush() } catch (e: Exception) {}
+        try { ph.release() } catch (e: Exception) {}
+    }
+
+    /** a USB output with four channels or more (null: none) */
+    private fun usb4(): AudioDeviceInfo? {
+        val outs = try { audio?.getDevices(AudioManager.GET_DEVICES_OUTPUTS) } catch (e: Exception) { null } ?: return null
+        for (d in outs) if ((d.type == AudioDeviceInfo.TYPE_USB_DEVICE || d.type == AudioDeviceInfo.TYPE_USB_HEADSET) &&
+            d.channelCounts.any { it >= 4 }) return d
+        return null
+    }
+
+    /** the headphones' level and limiter */
+    private fun phonesOut(l: FloatArray, r: FloatArray, n: Int) {
+        val g = phonesGain
+        val ceil = 0.966f
+        val rel = exp(-1.0 / (0.12 * rate)).toFloat()
+        val lim = limiter
+        for (k in 0 until n) {
+            var a = l[k] * g
+            var b = r[k] * g
+            if (lim) {
+                val m = maxOf(abs(a), abs(b))
+                val need = if (m * limGainH > ceil) ceil / m else 1f
+                limGainH = if (need < limGainH) need else limGainH * rel + (1f - rel) * minOf(1f, need)
+                a *= limGainH
+                b *= limGainH
+            }
+            l[k] = a.coerceIn(-1f, 1f)
+            r[k] = b.coerceIn(-1f, 1f)
+        }
     }
 
     /** REC: the armed track records from the play head; a bar of clicks first (count-in). */
@@ -228,7 +391,31 @@ class Engine(var project: Project) {
 
     private fun playLoop() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-        val track = AudioTrack.Builder()
+        // 0.10 CUE: a track in CUE and a USB output with 4 channels: one 4-channel track (1-2 main, 3-4 headphones)
+        mainRouteId = -1
+        fourCh = false
+        limGainH = 1f
+        var ch = 2
+        var usbId = -1
+        var track4: AudioTrack? = null
+        val usb = if (anyCue() && !splitCable && !(recording && recording4cal)) usb4() else null
+        if (usb != null) try {
+            val t4 = AudioTrack.Builder()
+                .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                    .setChannelIndexMask(0xF).build())
+                .setBufferSizeInBytes(maxOf(AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_STEREO,
+                    AudioFormat.ENCODING_PCM_FLOAT), burst * 8 * 4) * 2)
+                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                .build()
+            if (t4.state == AudioTrack.STATE_INITIALIZED && t4.channelCount == 4) {
+                track4 = t4
+                ch = 4
+                usbId = usb.id
+            } else t4.release()
+        } catch (e: Exception) {}                        // (no 4 channels after all: the stereo track, as ever)
+        val track = track4 ?: AudioTrack.Builder()
             .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
                 .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
             .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
@@ -244,9 +431,14 @@ class Engine(var project: Project) {
         val n = burst.coerceIn(64, 1024)
         val l = FloatArray(n)
         val r = FloatArray(n)
-        val out = FloatArray(n * 2)
+        val out = FloatArray(n * ch)
         val l2 = FloatArray(n)                           // (0.8 LOOP: the part of a block after the loop's end)
         val r2 = FloatArray(n)
+        val hl = FloatArray(n)                           // (0.10 CUE: the headphone mix, and its second track's block)
+        val hr = FloatArray(n)
+        val hl2 = FloatArray(n)
+        val hr2 = FloatArray(n)
+        val hout = FloatArray(n * 2)
         val ts = AudioTimestamp()
         var written = 0L
         var lastTs = 0L
@@ -263,22 +455,71 @@ class Engine(var project: Project) {
                 val le = pr.loopTo * bar
                 val looping = pr.loopOn && !recording && le > ls
                 if (looping && pos >= le) pos = ls              // (from before the loop: it plays into it)
+                // 0.10 CUE: is there a headphone path for this block (hp), and which
+                val cal = recording && recording4cal
+                val any = !cal && anyCue()
+                val split = splitCable && ch == 2 && !cal
+                val four = ch == 4 && fourCh
+                val ph = if (any && !split && !four && !cueFailed) phones else null
+                val hp = split || (any && (four || ph != null))
+                val st = if (split) 3 else if (!any) 0 else if (four) 1 else if (ph != null) 2 else if (cueFailed) 4 else 0
+                if (cueState != st) cueState = st
+                val xl = if (hp) hl else null
+                val xr = if (hp) hr else null
                 if (looping && pos + n > le) {
                     val m1 = (le - pos).coerceIn(0, n)
-                    mix(pos, m1, l, r, true)
-                    mix(ls, n - m1, l2, r2, true)
+                    mix(pos, m1, l, r, true, xl, xr)
+                    mix(ls, n - m1, l2, r2, true, if (hp) hl2 else null, if (hp) hr2 else null)
                     for (k in m1 until n) { l[k] = l2[k - m1]; r[k] = r2[k - m1] }
+                    if (hp) for (k in m1 until n) { hl[k] = hl2[k - m1]; hr[k] = hr2[k - m1] }
                     pos = ls + (n - m1) - n                  // (+ n below: ls + the rest)
                 } else {
-                    mix(pos, n, l, r, true)
+                    mix(pos, n, l, r, true, xl, xr)
                 }
-                if (monitor && recording && !recording4cal) monitorInto(l, r, n)
-                master(l, r, n, true)
-                for (k in 0 until n) {
-                    out[2 * k] = l[k]
-                    out[2 * k + 1] = r[k]
+                if (hp) {
+                    // the headphones: the CUE tracks + CUE MIX x the main mix (before MASTER), the monitor, their level
+                    val cm = cueMix
+                    for (k in 0 until n) {
+                        hl[k] += l[k] * cm
+                        hr[k] += r[k] * cm
+                    }
+                    if (monitor && recording && !recording4cal) monitorInto(hl, hr, n)
+                    master(l, r, n, true)
+                    phonesOut(hl, hr, n)
+                } else {
+                    if (monitor && recording && !recording4cal) monitorInto(l, r, n)
+                    master(l, r, n, true)
+                }
+                if (ch == 4) {
+                    for (k in 0 until n) {
+                        out[4 * k] = l[k]
+                        out[4 * k + 1] = r[k]
+                        out[4 * k + 2] = if (hp) hl[k] else 0f
+                        out[4 * k + 3] = if (hp) hr[k] else 0f
+                    }
+                } else if (split) {
+                    val sw = splitSwap
+                    for (k in 0 until n) {
+                        val m = (l[k] + r[k]) * 0.5f
+                        val h = (hl[k] + hr[k]) * 0.5f
+                        out[2 * k] = if (sw) h else m
+                        out[2 * k + 1] = if (sw) m else h
+                    }
+                } else {
+                    for (k in 0 until n) {
+                        out[2 * k] = l[k]
+                        out[2 * k + 1] = r[k]
+                    }
+                }
+                if (ph != null) {                        // the second track: what fits, now; it never holds the main up
+                    for (k in 0 until n) {
+                        hout[2 * k] = hl[k]
+                        hout[2 * k + 1] = hr[k]
+                    }
+                    ph.write(hout, 0, hout.size, AudioTrack.WRITE_NON_BLOCKING)
                 }
                 track.write(out, 0, out.size, AudioTrack.WRITE_BLOCKING)
+                blocks++
                 written += n
                 pos += n
                 val now = System.nanoTime()
@@ -286,7 +527,11 @@ class Engine(var project: Project) {
                     lastTs = now
                     if (track.getTimestamp(ts) && ts.framePosition > 0)
                         synchronized(outTs) { outTs.add(longArrayOf(ts.framePosition, ts.nanoTime)); if (outTs.size > 400) outTs.removeAt(0) }
-                    outRoute = track.routedDevice
+                    val rd = track.routedDevice
+                    outRoute = rd
+                    val rid = if (rd != null) rd.id else -1
+                    if (ch == 4) fourCh = rid != -1 && rid == usbId   // (3-4 only once it is known to play on the USB)
+                    mainRouteId = rid
                     val u = track.underrunCount
                     if (u > lastUnder) {                         // it ran dry: a burst more of buffer
                         underruns += u - lastUnder
@@ -298,6 +543,9 @@ class Engine(var project: Project) {
                 }
             }
         } finally {
+            fourCh = false
+            mainRouteId = -1
+            cueState = 0
             track.stop()
             track.release()
         }
@@ -432,14 +680,19 @@ class Engine(var project: Project) {
     /** n samples of the tracks from sample p into l / r (the track meters too when live); the click while playing */
     private val tbufs = arrayOf(FloatArray(1024), FloatArray(1024))   // [0] playback, [1] export
 
-    fun mix(p: Int, n: Int, l: FloatArray, r: FloatArray, live: Boolean) {
+    fun mix(p: Int, n: Int, l: FloatArray, r: FloatArray, live: Boolean, hl: FloatArray? = null, hr: FloatArray? = null) {
         java.util.Arrays.fill(l, 0f)
         java.util.Arrays.fill(r, 0f)
+        // 0.10 CUE: with hl / hr (a headphone path, live only) the tracks in CUE go there, not into l / r
+        val cueOut = hl != null && hr != null
+        if (hl != null) java.util.Arrays.fill(hl, 0f)
+        if (hr != null) java.util.Arrays.fill(hr, 0f)
         val tr = project.tracks
         val anySolo = tr.any { it.solo }
         for (t in tr) {
             val d = t.data ?: continue
-            val audible = if (anySolo) t.solo && !t.mute else !t.mute
+            val cue = cueOut && t.cue                    // (in CUE: heard in the headphones whatever SOLO says)
+            val audible = if (cue) !t.mute else if (anySolo) t.solo && !t.mute else !t.mute
             if (!audible || (live && recording && t.index == recTrack)) continue
             val len = minOf(t.length, d.limit())
             if (p + n <= 0 || p >= len) continue
@@ -456,10 +709,12 @@ class Engine(var project: Project) {
             if (t.eq.ver != t.eqVer) t.eq.update(t, rate)
             if (t.eq.active) t.eq.run(b, n, si)
             var pk = 0f
+            val tl = if (cue) hl!! else l
+            val tr2 = if (cue) hr!! else r
             for (k in 0 until n) {
                 val s = b[k]
-                l[k] += s * gl
-                r[k] += s * gr
+                tl[k] += s * gl
+                tr2[k] += s * gr
                 val a = abs(s * g)
                 if (a > pk) pk = a
             }
@@ -485,7 +740,7 @@ class Engine(var project: Project) {
 
     // ---------------- export ----------------
 
-    /** The whole song as heard (fader, pan, mute, solo, MASTER, the limiter; no click) into a stereo 16-bit WAV */
+    /** The whole song as heard (fader, pan, mute, solo, MASTER, the limiter; no click; CUE tracks in) into a stereo 16-bit WAV */
     fun mixdown(out: OutputStream) {
         val total = project.longest()
         Wav.header(out, rate, 2, total)

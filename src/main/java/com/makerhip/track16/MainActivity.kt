@@ -84,6 +84,7 @@ class MainActivity : Activity() {
     private var usbHintShown = false
     private val faders = ArrayList<FaderView>()
     private val stripBtns = ArrayList<Triple<Button, Button, Button>>()
+    private val cueBtns = ArrayList<Button>()           // 0.10 CUE
     private var showMixer = false
     private var busy = false
     private val d by lazy { resources.displayMetrics.density }
@@ -106,7 +107,12 @@ class MainActivity : Activity() {
         engine.raw = prefs.getBoolean("raw", true)
         engine.masterGain = prefs.getFloat("master", 1f)
         engine.limiter = prefs.getBoolean("limiter", true)
+        engine.cueMix = prefs.getFloat("cueMix", 0.5f)
+        engine.phonesGain = prefs.getFloat("phones", engine.masterGain)
+        engine.splitCable = prefs.getBoolean("split", false)
+        engine.splitSwap = prefs.getBoolean("splitSwap", false)
         val am = getSystemService(AUDIO_SERVICE) as AudioManager
+        engine.audio = am
         engine.burst = am.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)?.toIntOrNull()?.coerceIn(64, 1024) ?: 192
         val inId = prefs.getInt("inDev", -1)
         engine.input = am.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.id == inId }
@@ -337,6 +343,24 @@ class MainActivity : Activity() {
         }
         limBtn.setPadding(0, 0, 0, 0)
         col.addView(limBtn, LinearLayout.LayoutParams(-1, dp(34)).also { it.topMargin = dp(4) })
+        // 0.10 CUE: how much of the main mix the headphones get, and the headphones' own level
+        fun cueSlider(max: Int, v: Int, label: (Int) -> String, set: (Int) -> Unit) {
+            val tv = text(label(v), 9f, C.BLUE).also { it.gravity = Gravity.CENTER }
+            col.addView(tv, LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(6) })
+            val sb = SeekBar(this)
+            sb.max = max
+            sb.progress = v
+            sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, x: Int, user: Boolean) { if (user) { set(x); tv.text = label(x) } }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {
+                    prefs.edit().putFloat("cueMix", engine.cueMix).putFloat("phones", engine.phonesGain).apply()
+                }
+            })
+            col.addView(sb, LinearLayout.LayoutParams(-1, dp(30)))
+        }
+        cueSlider(100, (engine.cueMix * 100 + 0.5f).toInt(), { "CUE MIX $it%" }) { engine.cueMix = it / 100f }
+        cueSlider(120, (engine.phonesGain * 100 + 0.5f).toInt(), { "\uD83C\uDFA7 LEVEL $it%" }) { engine.phonesGain = it / 100f }
         masterFader = FaderView(this, C.ORANGE) { v ->
             if (!midi.learnTap("master")) setMaster(v)
         }
@@ -347,7 +371,7 @@ class MainActivity : Activity() {
         return col
     }
 
-    /** one mixer strip: number, name, ARM, M, S, PAN, the fader with its meter */
+    /** one mixer strip: number, name, ARM, M, S, CUE, PAN, the fader with its meter */
     private fun strip(i: Int): View {
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
@@ -361,11 +385,14 @@ class MainActivity : Activity() {
         val a = btn("R", 12f) { if (!midi.learnTap("arm:$i")) toggleArm(i) }
         val m = btn("M", 12f) { if (!midi.learnTap("mute:$i")) { val t = project.tracks[i]; t.mute = !t.mute; refreshAll() } }
         val s = btn("S", 12f) { if (!midi.learnTap("solo:$i")) { val t = project.tracks[i]; t.solo = !t.solo; refreshAll() } }
-        for (b in listOf(a, m, s)) {
+        // 0.10 CUE: out of the main output, into the headphones
+        val c = btn("CUE \uD83C\uDFA7", 11f) { val t = project.tracks[i]; t.cue = !t.cue; engine.cueChanged(); refreshAll() }
+        for (b in listOf(a, m, s, c)) {
             b.setPadding(0, 0, 0, 0)
             col.addView(b, LinearLayout.LayoutParams(-1, dp(34)).also { it.topMargin = dp(4) })
         }
         stripBtns.add(Triple(a, m, s))
+        cueBtns.add(c)
         val eqb = btn("EQ", 12f) { eqDialog(i) }
         eqb.setPadding(0, 0, 0, 0)
         eqBtns.add(eqb)
@@ -408,6 +435,7 @@ class MainActivity : Activity() {
             mixerRow.findViewWithTag<SeekBar>("pan$i")?.progress = ((t.pan + 1f) * 100).toInt()
             val (a, m, s) = stripBtns[i]
             lit(a, t.armed, C.RED); lit(m, t.mute, C.DIM); lit(s, t.solo, C.YELLOW)
+            lit(cueBtns[i], t.cue, C.BLUE)
             lit(eqBtns[i], t.eqUsed, C.TRACK[i])
         }
         masterFader.value = engine.masterGain
@@ -461,7 +489,14 @@ class MainActivity : Activity() {
             if (showMixer) masterFader.invalidate()
             engine.peakL *= 0.85f
             engine.peakR *= 0.85f
-            routeText.text = "OUT: " + routeName(engine.outRoute ?: defaultOut()) + "   IN: " + (engine.input?.let { devName(it) } ?: "Built-in mic")
+            val cue = when (engine.cueState) {             // 0.10 CUE: where the headphone mix goes now
+                1 -> "   \uD83C\uDFA7 USB 3-4"
+                2 -> "   \uD83C\uDFA7 " + routeName(engine.cueRoute)
+                3 -> if (engine.splitSwap) "   \uD83C\uDFA7 split: left" else "   \uD83C\uDFA7 split: right"
+                4 -> "   \uD83C\uDFA7 no 2nd output (CUE in main)"
+                else -> ""
+            }
+            routeText.text = "OUT: " + routeName(engine.outRoute ?: defaultOut()) + cue + "   IN: " + (engine.input?.let { devName(it) } ?: "Built-in mic")
             midiTick()
             ui.postDelayed(this, 40)
         }
@@ -1258,6 +1293,10 @@ class MainActivity : Activity() {
         note("Now: " + routeName(engine.outRoute ?: defaultOut()) +
             "   Buffer: ${engine.bufferFrames} frames (${engine.bufferFrames * 1000 / maxOf(1, project.rate)} ms)   Dropouts: ${engine.underruns}")
         note("Speaker, 3.5 mm (to headphones or to a speaker / mixer with a cable), Bluetooth or USB: the phone picks the newest one plugged in. Bluetooth adds a big delay: use a cable for recording.")
+        // 0.10 CUE
+        val split = toggle("Split cable (DJ): left = main, right = headphones", engine.splitCable, C.BLUE)
+        val swap = toggle("SWAP (left = headphones, right = main)", engine.splitSwap, C.BLUE)
+        note("CUE (\uD83C\uDFA7 on a strip): that track leaves the main output and plays in the headphones. The headphones are found by themselves: outputs 3-4 of a USB interface with 4 outputs, or a second output (wired / USB / Bluetooth headphones) next to the main one. With a Y split cable on the 3.5 mm jack (DJ cable), turn Split cable on: both sides are mono. With no second output, CUE tracks stay in the main.")
 
         val sv = android.widget.ScrollView(this)
         sv.addView(col)
@@ -1271,6 +1310,10 @@ class MainActivity : Activity() {
                 engine.latencyMs = lat.progress
                 engine.fineMs = fine.progress - 100
                 engine.limiter = lim()
+                engine.splitCable = split()
+                engine.splitSwap = swap()
+                engine.cueChanged()
+                prefs.edit().putBoolean("split", engine.splitCable).putBoolean("splitSwap", engine.splitSwap).apply()
                 prefs.edit().putInt("inDev", engine.input?.id ?: -1).putInt("inCh", ch)
                     .putFloat("inGain", engine.inputGainDb).putBoolean("raw", engine.raw)
                     .putBoolean("autoAlign", engine.autoAlign).putInt("latency", engine.latencyMs)

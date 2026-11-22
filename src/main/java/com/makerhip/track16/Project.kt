@@ -16,6 +16,7 @@ class Track(val index: Int) {
     @Volatile var pan = 0f             // -1 .. 1
     @Volatile var mute = false
     @Volatile var solo = false
+    @Volatile var cue = false          // 0.10: out of the main, into the headphones (not saved: a way of listening)
     @Volatile var armed = false
     @Volatile var data: ShortBuffer? = null      // the file mapped (read-only): playback reads it
     @Volatile var length = 0                     // samples
