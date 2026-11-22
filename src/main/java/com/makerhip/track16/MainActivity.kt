@@ -6,6 +6,7 @@ import android.app.AlertDialog
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioDeviceCallback
@@ -51,6 +52,11 @@ class MainActivity : Activity() {
     private lateinit var masterLabel: TextView
     private var midiDialog: AlertDialog? = null
     private lateinit var inboxBtn: Button
+    // 0.7: the EQ of the selected track, in the MIXER bar
+    private lateinit var eqTitle: TextView
+    private lateinit var eqMini: EqView
+    private lateinit var eqOnBtn: Button
+    private val eqKnobs = ArrayList<KnobView>()
     private lateinit var timeline: TimelineView
     private lateinit var mixerScroll: HorizontalScrollView
     private lateinit var mixerRow: LinearLayout
@@ -404,6 +410,7 @@ class MainActivity : Activity() {
         masterFader.value = engine.masterGain
         lit(limBtn, engine.limiter, C.ORANGE)
         midiLabelsPaint()
+        eqStripPaint()
         paint()
         timeline.invalidate()
     }
@@ -462,6 +469,8 @@ class MainActivity : Activity() {
         selected = i
         paint()
         timeline.invalidate()
+        eqStripPaint()
+        midiLabelsPaint()
     }
 
     fun seek(p: Int) {
@@ -538,6 +547,8 @@ class MainActivity : Activity() {
 
     /** the bar above the strips: MIDI (devices), LEARN, CLOCK, THRU, what is connected */
     private fun midiBar(): View {
+        val outer = LinearLayout(this)
+        outer.orientation = LinearLayout.VERTICAL
         val r = row()
         r.setPadding(dp(8), dp(6), dp(8), 0)
         midiBtn = btn("MIDI", 13f) { midiDialog() }
@@ -568,8 +579,77 @@ class MainActivity : Activity() {
         r.addView(learnBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40), 0f, dp(6)))
         r.addView(clockBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40), 0f, dp(6)))
         r.addView(thruBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40), 0f, dp(6)))
-        r.addView(midiText, lp(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f, dp(12)))
+        // 0.7: the selected track's EQ fills the rest of the bar (tap a track's number to choose it)
+        val eqScroll = HorizontalScrollView(this)
+        eqScroll.isHorizontalScrollBarEnabled = false
+        eqScroll.addView(eqStrip())
+        r.addView(eqScroll, lp(0, dp(78), 1f, dp(12)))
+        outer.addView(r)
+        midiText.setPadding(dp(10), dp(2), dp(10), 0)
+        outer.addView(midiText)
+        return outer
+    }
+
+    /** the EQ of the selected track as a strip of knobs: its name, the curve, LOW-CUT, LOW, MID FREQ, MID, HIGH, ON */
+    private fun eqStrip(): View {
+        val r = row()
+        r.background = bg(C.PANEL2, 12, C.LINE)
+        r.setPadding(dp(8), dp(4), dp(8), dp(4))
+        val tc = LinearLayout(this)
+        tc.orientation = LinearLayout.VERTICAL
+        eqTitle = text("", 13f, C.TEXT, true)
+        tc.addView(eqTitle)
+        eqOnBtn = btn("EQ ON", 12f) {
+            val t = project.tracks[selected]
+            t.eqOn = !t.eqOn; t.eqVer++; eqChanged(selected); project.save()
+        }
+        eqOnBtn.setPadding(dp(10), 0, dp(10), 0)
+        tc.addView(eqOnBtn, LinearLayout.LayoutParams(-2, dp(32)).also { it.topMargin = dp(4) })
+        r.addView(tc, lp(LinearLayout.LayoutParams.WRAP_CONTENT, -1))
+        eqMini = EqView(this, C.TRACK[0])
+        eqMini.rate = project.rate
+        r.addView(eqMini, lp(dp(110), -1, 0f, dp(8)))
+        fun db(v: Float) = if (kotlin.math.abs(v) < 0.25f) "0" else String.format(Locale.US, "%+.1f", v)
+        fun knob(label: String, min: Float, max: Float, def: Float, target: String, fmt: (Float) -> String,
+                 get: (Track) -> Float, set: (Track, Float) -> Unit) {
+            val k = KnobView(this, label, min, max, def, fmt, { midi.learnTap("$target:$selected") }) { v ->
+                val t = project.tracks[selected]
+                set(t, v); t.eqVer++; eqChanged(selected)
+            }
+            k.tag = get
+            eqKnobs.add(k)
+            r.addView(k, lp(dp(54), -1, 0f, dp(4)))
+        }
+        knob("LOW-CUT", 0f, 300f, 0f, "eqcut", { if (it < 40f) "off" else "${it.toInt()}" },
+            { it.lowCut.toFloat() }, { t, v -> t.lowCut = if (v < 40f) 0 else (v / 10).toInt() * 10 })
+        knob("LOW", -12f, 12f, 0f, "eqlow", ::db, { it.lowDb }, { t, v -> t.lowDb = (v * 2).toInt() / 2f })
+        knob("MID Hz", 0f, 1f, (kotlin.math.ln(1000.0 / 200.0) / kotlin.math.ln(25.0)).toFloat(), "eqfreq",
+            { midHzOf((it * 100).toInt()).let { f -> if (f >= 1000) String.format(Locale.US, "%.1fk", f / 1000f) else "$f" } },
+            { (kotlin.math.ln(it.midHz / 200.0) / kotlin.math.ln(25.0)).toFloat() }, { t, v -> t.midHz = midHzOf((v * 100).toInt()) })
+        knob("MID", -12f, 12f, 0f, "eqmid", ::db, { it.midDb }, { t, v -> t.midDb = (v * 2).toInt() / 2f })
+        knob("HIGH", -12f, 12f, 0f, "eqhigh", ::db, { it.highDb }, { t, v -> t.highDb = (v * 2).toInt() / 2f })
         return r
+    }
+
+    /** the EQ strip shows the selected track (its colour, its values) */
+    @Suppress("UNCHECKED_CAST")
+    private fun eqStripPaint() {
+        if (!::eqTitle.isInitialized) return
+        val i = selected
+        val t = project.tracks[i]
+        eqTitle.text = "EQ · ${i + 1} ${t.name}"
+        eqTitle.setTextColor(C.TRACK[i])
+        if (t.eq.ver != t.eqVer) t.eq.update(t, project.rate)
+        eqMini.eq = t.eq
+        eqMini.on = t.eqOn
+        eqMini.rate = project.rate
+        eqMini.recolor(C.TRACK[i])
+        eqMini.invalidate()
+        lit(eqOnBtn, t.eqOn, C.GREEN)
+        for (k in eqKnobs) {
+            k.color = C.TRACK[i]
+            k.value = (k.tag as (Track) -> Float)(t)
+        }
     }
 
     /** the MIDI state changed (a device, LEARN, CLOCK, THRU, the SMC bank): the bar, the labels, the dialog */
@@ -616,7 +696,8 @@ class MainActivity : Activity() {
         for (i in 0 until Project.N) {
             val sel = p != null && p.endsWith(":$i")
             val smc = midi.hub.conns.any { it.smc } && i / 8 == midi.bank
-            strips.getChildAt(i).background = bg(C.PANEL, 12, if (sel) C.YELLOW else if (smc) C.BLUE else 0)
+            strips.getChildAt(i).background = if (i == selected && !sel) bg(Color.argb(60, Color.red(C.TRACK[i]), Color.green(C.TRACK[i]), Color.blue(C.TRACK[i])), 12, C.TRACK[i])
+                else bg(C.PANEL, 12, if (sel) C.YELLOW else if (smc) C.BLUE else 0)
         }
     }
 
@@ -714,6 +795,7 @@ class MainActivity : Activity() {
     fun eqChanged(i: Int) {
         lit(eqBtns[i], project.tracks[i].eqUsed, C.TRACK[i])
         eqRefresh?.invoke()
+        if (i == selected) eqStripPaint()
     }
 
     private fun eqDialog(i: Int) {

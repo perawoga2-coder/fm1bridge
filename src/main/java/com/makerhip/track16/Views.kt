@@ -229,7 +229,8 @@ class StereoMeter(ctx: Context) : View(ctx) {
 }
 
 /** The EQ's picture: its curve over 20 Hz .. 20 kHz, ±15 dB */
-class EqView(ctx: Context, private val color: Int) : View(ctx) {
+class EqView(ctx: Context, private var color: Int) : View(ctx) {
+    fun recolor(c: Int) { color = c }
     private val d = resources.displayMetrics.density
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
     private val path = android.graphics.Path()
@@ -269,5 +270,77 @@ class EqView(ctx: Context, private val color: Int) : View(ctx) {
         p.color = if (on) color else C.DIM
         c.drawPath(path, p)
         p.style = Paint.Style.FILL
+    }
+}
+
+/** A rotary knob, as on a mixing desk: drag up / down to turn, double tap for its default. The label under it,
+ * the value inside. [value] is in min..max; [onChange] gets the new value (and is told when the touch begins). */
+class KnobView(ctx: Context, private val label: String, private val min: Float, private val max: Float,
+               private val def: Float, private val fmt: (Float) -> String, private val onTouch: () -> Unit,
+               private val onChange: (Float) -> Unit) : View(ctx) {
+    private val d = resources.displayMetrics.density
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    var color = C.ORANGE
+    var value = def
+        set(v) { field = v.coerceIn(min, max); invalidate() }
+    private var downY = 0f
+    private var downV = 0f
+    private var lastTap = 0L
+
+    override fun onDraw(c: Canvas) {
+        val w = width.toFloat()
+        val kh = height - 14 * d
+        val r = minOf(w, kh) / 2 - 3 * d
+        val cx = w / 2
+        val cy = kh / 2 + 1 * d
+        val f = (value - min) / (max - min)
+        val box = RectF(cx - r, cy - r, cx + r, cy + r)
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = 3.5f * d
+        p.strokeCap = Paint.Cap.ROUND
+        p.color = C.LINE
+        c.drawArc(box, 135f, 270f, false, p)
+        p.color = color
+        // from the centre for a knob whose default is in the middle (cut / boost), else from the left
+        val from = if (def > min && def < max) (def - min) / (max - min) else 0f
+        val a0 = 135f + 270f * minOf(from, f)
+        c.drawArc(box, a0, 270f * kotlin.math.abs(f - from), false, p)
+        p.style = Paint.Style.FILL
+        p.color = C.PANEL2
+        c.drawCircle(cx, cy, r - 4 * d, p)
+        val ang = Math.toRadians((135f + 270f * f).toDouble())
+        p.color = C.TEXT
+        p.strokeWidth = 2.5f * d
+        p.style = Paint.Style.STROKE
+        c.drawLine(cx + (r * 0.25f) * Math.cos(ang).toFloat(), cy + (r * 0.25f) * Math.sin(ang).toFloat(),
+            cx + (r - 5 * d) * Math.cos(ang).toFloat(), cy + (r - 5 * d) * Math.sin(ang).toFloat(), p)
+        p.style = Paint.Style.FILL
+        p.textAlign = Paint.Align.CENTER
+        p.textSize = 9.5f * d
+        p.color = C.DIM
+        c.drawText(label, cx, height - 2 * d, p)
+        p.color = C.TEXT
+        p.textSize = 8.5f * d
+        c.drawText(fmt(value), cx, cy + r + 1 * d, p)
+        p.textAlign = Paint.Align.LEFT
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    override fun onTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                parent?.requestDisallowInterceptTouchEvent(true)
+                val now = System.currentTimeMillis()
+                if (now - lastTap < 300) { value = def; onChange(value); lastTap = 0; return true }
+                lastTap = now
+                downY = ev.y; downV = value
+                onTouch()
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val nv = downV + (downY - ev.y) / (160 * d) * (max - min)
+                if (nv.coerceIn(min, max) != value) { value = nv; onChange(value) }
+            }
+        }
+        return true
     }
 }
