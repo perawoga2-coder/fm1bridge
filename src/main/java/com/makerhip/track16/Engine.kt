@@ -245,6 +245,8 @@ class Engine(var project: Project) {
         val l = FloatArray(n)
         val r = FloatArray(n)
         val out = FloatArray(n * 2)
+        val l2 = FloatArray(n)                           // (0.8 LOOP: the part of a block after the loop's end)
+        val r2 = FloatArray(n)
         val ts = AudioTimestamp()
         var written = 0L
         var lastTs = 0L
@@ -254,7 +256,22 @@ class Engine(var project: Project) {
         track.play()
         try {
             while (playing) {
-                mix(pos, n, l, r, true)
+                // 0.8 LOOP (playing only, never while recording): bars loopFrom..loopTo round and round
+                val pr = project
+                val bar = beatSamples() * 4
+                val ls = (pr.loopFrom - 1) * bar
+                val le = pr.loopTo * bar
+                val looping = pr.loopOn && !recording && le > ls
+                if (looping && pos >= le) pos = ls              // (from before the loop: it plays into it)
+                if (looping && pos + n > le) {
+                    val m1 = (le - pos).coerceIn(0, n)
+                    mix(pos, m1, l, r, true)
+                    mix(ls, n - m1, l2, r2, true)
+                    for (k in m1 until n) { l[k] = l2[k - m1]; r[k] = r2[k - m1] }
+                    pos = ls + (n - m1) - n                  // (+ n below: ls + the rest)
+                } else {
+                    mix(pos, n, l, r, true)
+                }
                 if (monitor && recording && !recording4cal) monitorInto(l, r, n)
                 master(l, r, n, true)
                 for (k in 0 until n) {

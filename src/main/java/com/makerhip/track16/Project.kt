@@ -45,6 +45,10 @@ class Project(val dir: File) {
     var bpm = 120
     var rate = 48000
     val tracks = Array(N) { Track(it) }
+    // 0.8 LOOP: play bars loopFrom..loopTo (1-based, inclusive) round and round, to listen while mixing
+    @Volatile var loopOn = false
+    @Volatile var loopFrom = 1
+    @Volatile var loopTo = 4
 
     fun pcm(i: Int) = File(dir, "track%02d.pcm".format(i + 1))
 
@@ -53,6 +57,9 @@ class Project(val dir: File) {
         o.put("title", title)
         o.put("bpm", bpm)
         o.put("rate", rate)
+        o.put("loopOn", loopOn)
+        o.put("loopFrom", loopFrom)
+        o.put("loopTo", loopTo)
         val a = JSONArray()
         for (t in tracks) {
             val j = JSONObject()
@@ -78,6 +85,9 @@ class Project(val dir: File) {
             title = o.optString("title", dir.name)
             bpm = o.optInt("bpm", 120).coerceIn(30, 300)
             rate = o.optInt("rate", 48000)
+            loopOn = o.optBoolean("loopOn", false)
+            loopFrom = o.optInt("loopFrom", 1).coerceIn(1, 999)
+            loopTo = o.optInt("loopTo", 4).coerceIn(loopFrom, 999)
             val a = o.optJSONArray("tracks")
             if (a != null) for (i in 0 until minOf(N, a.length())) {
                 val j = a.getJSONObject(i)

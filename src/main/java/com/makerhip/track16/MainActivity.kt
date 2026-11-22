@@ -57,6 +57,9 @@ class MainActivity : Activity() {
     private lateinit var eqMini: EqView
     private lateinit var eqOnBtn: Button
     private val eqKnobs = ArrayList<KnobView>()
+    private lateinit var loopBtn: Button
+    private lateinit var loopFromText: TextView
+    private lateinit var loopToText: TextView
     private lateinit var timeline: TimelineView
     private lateinit var mixerScroll: HorizontalScrollView
     private lateinit var mixerRow: LinearLayout
@@ -411,6 +414,7 @@ class MainActivity : Activity() {
         lit(limBtn, engine.limiter, C.ORANGE)
         midiLabelsPaint()
         eqStripPaint()
+        loopPaint()
         paint()
         timeline.invalidate()
     }
@@ -582,7 +586,10 @@ class MainActivity : Activity() {
         // 0.7: the selected track's EQ fills the rest of the bar (tap a track's number to choose it)
         val eqScroll = HorizontalScrollView(this)
         eqScroll.isHorizontalScrollBarEnabled = false
-        eqScroll.addView(eqStrip())
+        val strips = row()
+        strips.addView(eqStrip())
+        strips.addView(loopStrip(), lp(LinearLayout.LayoutParams.WRAP_CONTENT, -1, 0f, dp(8)))
+        eqScroll.addView(strips)
         r.addView(eqScroll, lp(0, dp(78), 1f, dp(12)))
         outer.addView(r)
         midiText.setPadding(dp(10), dp(2), dp(10), 0)
@@ -629,6 +636,55 @@ class MainActivity : Activity() {
         knob("MID", -12f, 12f, 0f, "eqmid", ::db, { it.midDb }, { t, v -> t.midDb = (v * 2).toInt() / 2f })
         knob("HIGH", -12f, 12f, 0f, "eqhigh", ::db, { it.highDb }, { t, v -> t.highDb = (v * 2).toInt() / 2f })
         return r
+    }
+
+    /** 0.8 LOOP: listen to bars FROM..TO round and round while mixing (playing only; recording never loops) */
+    private fun loopStrip(): View {
+        val r = row()
+        r.background = bg(C.PANEL2, 12, C.LINE)
+        r.setPadding(dp(8), dp(4), dp(8), dp(4))
+        loopBtn = btn("⟲ LOOP", 13f) { project.loopOn = !project.loopOn; project.save(); loopPaint() }
+        r.addView(loopBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44)))
+        fun stepper(label: String, get: () -> Int, set: (Int) -> Unit): TextView {
+            val c = LinearLayout(this)
+            c.orientation = LinearLayout.VERTICAL
+            c.gravity = Gravity.CENTER_HORIZONTAL
+            c.addView(text(label, 10f, C.DIM).also { it.gravity = Gravity.CENTER })
+            val rr = row()
+            val v = text("", 16f, C.TEXT, true)
+            v.gravity = Gravity.CENTER
+            rr.addView(btn("−", 14f) { set(get() - 1); loopChanged() }.also { it.setPadding(dp(10), 0, dp(10), 0) }, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)))
+            rr.addView(v, lp(dp(36), LinearLayout.LayoutParams.WRAP_CONTENT))
+            rr.addView(btn("+", 14f) { set(get() + 1); loopChanged() }.also { it.setPadding(dp(10), 0, dp(10), 0) }, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(38)))
+            c.addView(rr)
+            r.addView(c, lp(LinearLayout.LayoutParams.WRAP_CONTENT, -1, 0f, dp(8)))
+            return v
+        }
+        loopFromText = stepper("FROM bar", { project.loopFrom }) { v ->
+            project.loopFrom = v.coerceIn(1, 999)
+            if (project.loopTo < project.loopFrom) project.loopTo = project.loopFrom
+        }
+        loopToText = stepper("TO bar", { project.loopTo }) { v -> project.loopTo = v.coerceIn(project.loopFrom, 999) }
+        r.addView(btn("SET", 13f) {
+            val len = project.loopTo - project.loopFrom
+            project.loopFrom = maxOf(0, engine.pos) / (engine.beatSamples() * 4) + 1
+            project.loopTo = project.loopFrom + len
+            loopChanged()
+        }, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44), 0f, dp(8)))
+        return r
+    }
+
+    private fun loopChanged() {
+        project.save()
+        loopPaint()
+    }
+
+    private fun loopPaint() {
+        if (!::loopBtn.isInitialized) return
+        lit(loopBtn, project.loopOn, C.GREEN)
+        loopFromText.text = "${project.loopFrom}"
+        loopToText.text = "${project.loopTo}"
+        timeline.invalidate()
     }
 
     /** the EQ strip shows the selected track (its colour, its values) */
@@ -941,6 +997,7 @@ class MainActivity : Activity() {
                 done++
             }
             if (b.bpm in 30..300) p.bpm = b.bpm
+            if (b.bars > 0) { p.loopFrom = 1; p.loopTo = b.bars; p.loopOn = true }   // (0.8: listen to it round and round)
             p.save()
             ui.post {
                 busy = false

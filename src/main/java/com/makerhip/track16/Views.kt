@@ -68,6 +68,17 @@ class TimelineView(ctx: Context, private val app: MainActivity) : View(ctx) {
             }
             b += bar
         }
+        // 0.8 LOOP: the bars that play round and round
+        if (pr.loopOn) {
+            val lx0 = headW + ((pr.loopFrom - 1) * bar - scrollSamples) / spp
+            val lx1 = headW + (pr.loopTo * bar - scrollSamples) / spp
+            if (lx1 > headW && lx0 < width) {
+                p.color = Color.argb(46, 52, 211, 153)
+                c.drawRect(maxOf(headW, lx0), 0f, minOf(width.toFloat(), lx1), height.toFloat(), p)
+                p.color = C.GREEN
+                c.drawRect(maxOf(headW, lx0), 0f, minOf(width.toFloat(), lx1), 4 * d, p)
+            }
+        }
         for (i in 0 until Project.N) {
             val t = pr.tracks[i]
             val y0 = rulerH + i * lh
