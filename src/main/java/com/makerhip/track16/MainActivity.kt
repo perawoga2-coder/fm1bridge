@@ -46,6 +46,8 @@ class MainActivity : Activity() {
     private lateinit var midiText: TextView
     private lateinit var mixerPane: LinearLayout
     private val midiLabels = ArrayList<TextView>()
+    private val eqBtns = ArrayList<Button>()
+    private var eqRefresh: (() -> Unit)? = null
     private lateinit var masterLabel: TextView
     private var midiDialog: AlertDialog? = null
     private lateinit var timeline: TimelineView
@@ -226,8 +228,16 @@ class MainActivity : Activity() {
         tc.addView(timeText)
         tc.addView(routeText)
         head.addView(tc, lp(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f, dp(14)))
+        // the MIXER / TRACKS switch: big, in the middle of the bar
+        viewBtn = btn("MIXER", 22f) { showMixer = !showMixer; refreshAll() }
+        viewBtn.minWidth = dp(150)
+        viewBtn.setPadding(dp(22), 0, dp(22), 0)
+        head.addView(viewBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(64), 0f, dp(10)))
+        val right = row()
+        right.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        head.addView(right, lp(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f, dp(10)))
         outMeter = StereoMeter(this)
-        head.addView(outMeter, lp(dp(14), dp(56), 0f, dp(6)))
+        right.addView(outMeter, lp(dp(14), dp(56), 0f, dp(6)))
         val bpm = row()
         bpm.background = bg(C.PANEL2, 12, C.LINE)
         bpm.addView(btn("−", 18f) { setBpm(project.bpm - 1) }.also { it.background = null })
@@ -235,14 +245,12 @@ class MainActivity : Activity() {
         bpmText.setOnClickListener { bpmDialog() }
         bpm.addView(bpmText)
         bpm.addView(btn("+", 18f) { setBpm(project.bpm + 1) }.also { it.background = null })
-        head.addView(bpm, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48)))
+        right.addView(bpm, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48), 0f, dp(8)))
         clickBtn = btn("Click") { engine.metronome = !engine.metronome; prefs.edit().putBoolean("click", engine.metronome).apply(); paint() }
-        head.addView(clickBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48), 0f, dp(8)))
+        right.addView(clickBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48), 0f, dp(8)))
         countBtn = btn("Count-in") { engine.countIn = !engine.countIn; prefs.edit().putBoolean("countIn", engine.countIn).apply(); paint() }
-        head.addView(countBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48), 0f, dp(6)))
-        viewBtn = btn("MIXER") { showMixer = !showMixer; refreshAll() }
-        head.addView(viewBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48), 0f, dp(8)))
-        head.addView(btn("☰", 18f) { menu() }, lp(dp(52), dp(48), 0f, dp(6)))
+        right.addView(countBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48), 0f, dp(6)))
+        right.addView(btn("☰", 18f) { menu() }, lp(dp(52), dp(48), 0f, dp(6)))
         root.addView(head)
 
         // the selected track: its name, ARM, M, S, import, clear, the input meter
@@ -340,6 +348,10 @@ class MainActivity : Activity() {
             col.addView(b, LinearLayout.LayoutParams(-1, dp(34)).also { it.topMargin = dp(4) })
         }
         stripBtns.add(Triple(a, m, s))
+        val eqb = btn("EQ", 12f) { eqDialog(i) }
+        eqb.setPadding(0, 0, 0, 0)
+        eqBtns.add(eqb)
+        col.addView(eqb, LinearLayout.LayoutParams(-1, dp(34)).also { it.topMargin = dp(4) })
         col.addView(text("PAN", 9f, C.DIM).also { it.gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(6) })
         val pan = SeekBar(this)
         pan.max = 200
@@ -370,13 +382,15 @@ class MainActivity : Activity() {
         bpmText.text = " ${project.bpm} BPM "
         timeline.visibility = if (showMixer) View.GONE else View.VISIBLE
         mixerPane.visibility = if (showMixer) View.VISIBLE else View.GONE
-        viewBtn.text = if (showMixer) "TRACKS" else "MIXER"
+        viewBtn.text = if (showMixer) "◀ TRACKS" else "MIXER ▶"
+        lit(viewBtn, true, if (showMixer) C.BLUE else C.ORANGE)
         for (i in 0 until Project.N) {
             val t = project.tracks[i]
             faders[i].value = t.gain
             mixerRow.findViewWithTag<SeekBar>("pan$i")?.progress = ((t.pan + 1f) * 100).toInt()
             val (a, m, s) = stripBtns[i]
             lit(a, t.armed, C.RED); lit(m, t.mute, C.DIM); lit(s, t.solo, C.YELLOW)
+            lit(eqBtns[i], t.eqUsed, C.TRACK[i])
         }
         masterFader.value = engine.masterGain
         lit(limBtn, engine.limiter, C.ORANGE)
@@ -556,7 +570,7 @@ class MainActivity : Activity() {
         lit(thruBtn, midi.thruOn, C.GREEN)
         midiText.text = when {
             midi.learn && midi.pending != null -> "LEARN: now move a knob, fader or button on the controller (" + targetName(midi.pending!!) + ")"
-            midi.learn -> "LEARN: tap a fader, PAN, R / M / S, MASTER or PLAY / REC, then move the controller. Hold LEARN to clear all."
+            midi.learn -> "LEARN: tap a fader, PAN, R / M / S, MASTER, PLAY / REC or an EQ slider, then move the controller. Hold LEARN to clear all."
             cs.isEmpty() -> if (midi.hub.available) "No MIDI device. Tap MIDI to connect Bluetooth; USB connects by itself." else "This device has no MIDI."
             else -> cs.joinToString("   ") { (if (it.bt) "BT: " else "USB: ") + it.name + if (it.smc) " (tracks ${midi.bank * 8 + 1}-${midi.bank * 8 + 8})" else "" }
         }
@@ -570,6 +584,8 @@ class MainActivity : Activity() {
         t == "play" -> "PLAY"
         t == "rec" -> "REC"
         t == "rtz" -> "to the start"
+        t.startsWith("eq") -> "EQ " + mapOf("eqcut" to "LOW-CUT", "eqlow" to "LOW", "eqmid" to "MID", "eqfreq" to "MID FREQ",
+            "eqhigh" to "HIGH")[t.substringBefore(':')] + " " + (t.substringAfter(':').toInt() + 1)
         else -> t.substringBefore(':').let { if (it == "arm") "R" else it.uppercase() } + " " + (t.substringAfter(':').toInt() + 1)
     }
 
@@ -679,6 +695,80 @@ class MainActivity : Activity() {
             "Bluetooth MIDI devices are found here, not in the phone's Bluetooth settings. A USB MIDI device (the FM-1 " +
             "with an OTG cable) connects by itself.", 12f, C.DIM).also { it.setPadding(0, dp(12), 0, 0) })
     }
+
+    // ---------------- EQ ----------------
+
+    /** an EQ value moved from MIDI: the strip's light, the open EQ panel */
+    fun eqChanged(i: Int) {
+        lit(eqBtns[i], project.tracks[i].eqUsed, C.TRACK[i])
+        eqRefresh?.invoke()
+    }
+
+    private fun eqDialog(i: Int) {
+        val t = project.tracks[i]
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.setPadding(dp(20), dp(8), dp(20), dp(8))
+        val view = EqView(this, C.TRACK[i])
+        view.rate = project.rate
+        if (t.eq.ver != t.eqVer) t.eq.update(t, project.rate)
+        view.eq = t.eq
+        col.addView(view, LinearLayout.LayoutParams(-1, dp(130)))
+        val sliders = ArrayList<() -> Unit>()
+        fun changed() {
+            t.eqVer++
+            t.eq.update(t, project.rate)
+            view.on = t.eqOn
+            view.invalidate()
+            lit(eqBtns[i], t.eqUsed, C.TRACK[i])
+        }
+        fun slider(target: String, label: (Int) -> String, max: Int, get: () -> Int, set: (Int) -> Unit) {
+            val tv = text(label(get()), 14f, C.TEXT, true)
+            tv.setPadding(0, dp(10), 0, 0)
+            col.addView(tv)
+            val sb = SeekBar(this)
+            sb.max = max
+            sb.progress = get()
+            sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, v: Int, user: Boolean) {
+                    tv.text = label(v)
+                    if (user) { set(v); changed() }
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) { midi.learnTap(target) }
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+            col.addView(sb)
+            sliders.add { sb.progress = get(); tv.text = label(get()) }
+        }
+        fun dbText(name: String, v: Int) = "$name  " + (v - 24).let { if (it == 0) "0 dB" else String.format(Locale.US, "%+.1f dB", it / 2f) }
+        slider("eqcut:$i", { if (it < 4) "LOW-CUT  off" else "LOW-CUT  ${it * 10} Hz" }, 30,
+            { t.lowCut / 10 }, { t.lowCut = if (it < 4) 0 else it * 10 })
+        slider("eqlow:$i", { dbText("LOW (100 Hz)", it) }, 48, { (t.lowDb * 2).toInt() + 24 }, { t.lowDb = (it - 24) / 2f })
+        slider("eqfreq:$i", { "MID frequency  " + midHzOf(it).let { f -> if (f >= 1000) String.format(Locale.US, "%.1f kHz", f / 1000f) else "$f Hz" } }, 100,
+            { (kotlin.math.ln(t.midHz / 200.0) / kotlin.math.ln(25.0) * 100).toInt() }, { t.midHz = midHzOf(it) })
+        slider("eqmid:$i", { dbText("MID", it) }, 48, { (t.midDb * 2).toInt() + 24 }, { t.midDb = (it - 24) / 2f })
+        slider("eqhigh:$i", { dbText("HIGH (8 kHz)", it) }, 48, { (t.highDb * 2).toInt() + 24 }, { t.highDb = (it - 24) / 2f })
+        val r = row()
+        r.setPadding(0, dp(12), 0, 0)
+        lateinit var onBtn: Button
+        onBtn = btn("EQ ON", 14f) { t.eqOn = !t.eqOn; lit(onBtn, t.eqOn, C.GREEN); changed() }
+        lit(onBtn, t.eqOn, C.GREEN)
+        r.addView(onBtn, lp(0, dp(46), 1f))
+        r.addView(btn("RESET", 14f) { t.eqReset(); sliders.forEach { it() }; lit(onBtn, t.eqOn, C.GREEN); changed() }, lp(0, dp(46), 1f, dp(8)))
+        col.addView(r)
+        col.addView(text("EQ ON off: hear the track without its EQ (to compare). Plays live and goes into the exported mix. " +
+            "With MIDI LEARN on, touch a slider here, then move the controller.", 12f, C.DIM).also { it.setPadding(0, dp(10), 0, 0) })
+        view.on = t.eqOn
+        eqRefresh = { sliders.forEach { it() }; lit(onBtn, t.eqOn, C.GREEN); view.on = t.eqOn; view.invalidate() }
+        val sv = android.widget.ScrollView(this)
+        sv.addView(col)
+        AlertDialog.Builder(this).setTitle("EQ  ·  track ${i + 1}  ${t.name}").setView(sv)
+            .setPositiveButton("Done", null)
+            .setOnDismissListener { eqRefresh = null; project.save() }.show()
+    }
+
+    private fun midHzOf(p: Int): Int = (200 * Math.pow(25.0, p / 100.0)).toInt().let { f ->
+        if (f >= 1000) (f + 50) / 100 * 100 else (f + 5) / 10 * 10 }.coerceIn(200, 5000)
 
     private fun clearTrack() {
         if (engine.playing) return

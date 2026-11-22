@@ -21,6 +21,18 @@ class Track(val index: Int) {
     @Volatile var length = 0                     // samples
     @Volatile var peak = 0f                      // meter (playback writes, the UI reads and decays)
     var peaks: FloatArray = FloatArray(0)        // the waveform: one peak per PEAK_STEP samples
+    // the EQ (eqVer counts changes: playback recomputes its filters when it moves)
+    @Volatile var eqOn = true
+    @Volatile var lowCut = 0                     // Hz, 0 = off
+    @Volatile var lowDb = 0f                     // -12 .. 12
+    @Volatile var midDb = 0f
+    @Volatile var midHz = 1000                   // 200 .. 5000
+    @Volatile var highDb = 0f
+    @Volatile var eqVer = 0
+    val eq = TrackEq()
+    val eqUsed get() = eqOn && (lowCut > 0 || lowDb != 0f || midDb != 0f || highDb != 0f)
+
+    fun eqReset() { lowCut = 0; lowDb = 0f; midDb = 0f; midHz = 1000; highDb = 0f; eqOn = true; eqVer++ }
 
     companion object {
         const val PEAK_STEP = 512
@@ -49,6 +61,10 @@ class Project(val dir: File) {
             j.put("pan", t.pan.toDouble())
             j.put("mute", t.mute)
             j.put("solo", t.solo)
+            val e = JSONObject()
+            e.put("on", t.eqOn); e.put("cut", t.lowCut); e.put("low", t.lowDb.toDouble()); e.put("mid", t.midDb.toDouble())
+            e.put("midHz", t.midHz); e.put("high", t.highDb.toDouble())
+            j.put("eq", e)
             a.put(j)
         }
         o.put("tracks", a)
@@ -71,6 +87,15 @@ class Project(val dir: File) {
                 t.pan = j.optDouble("pan", 0.0).toFloat()
                 t.mute = j.optBoolean("mute", false)
                 t.solo = j.optBoolean("solo", false)
+                j.optJSONObject("eq")?.let { e ->
+                    t.eqOn = e.optBoolean("on", true)
+                    t.lowCut = e.optInt("cut", 0).coerceIn(0, 300)
+                    t.lowDb = e.optDouble("low", 0.0).toFloat().coerceIn(-12f, 12f)
+                    t.midDb = e.optDouble("mid", 0.0).toFloat().coerceIn(-12f, 12f)
+                    t.midHz = e.optInt("midHz", 1000).coerceIn(200, 5000)
+                    t.highDb = e.optDouble("high", 0.0).toFloat().coerceIn(-12f, 12f)
+                    t.eqVer++
+                }
             }
         }
         for (i in 0 until N) map(i)

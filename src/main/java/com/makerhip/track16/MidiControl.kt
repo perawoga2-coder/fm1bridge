@@ -126,7 +126,7 @@ class MidiControl(private val a: MainActivity, private val prefs: SharedPreferen
         else hub.send(m.status, m.d1, m.d2, skip = c)
     }
 
-    private fun continuous(t: String) = t.startsWith("fader") || t.startsWith("pan") || t == "master"
+    private fun continuous(t: String) = t.startsWith("fader") || t.startsWith("pan") || t == "master" || t.startsWith("eq")
 
     private fun idx(t: String) = t.substringAfter(':').toInt()
 
@@ -135,6 +135,11 @@ class MidiControl(private val a: MainActivity, private val prefs: SharedPreferen
         t == "master" -> a.engine.masterGain / 1.2f
         t.startsWith("fader") -> a.project.tracks[idx(t)].gain / 1.2f
         t.startsWith("pan") -> (a.project.tracks[idx(t)].pan + 1f) / 2f
+        t.startsWith("eqlow") -> (a.project.tracks[idx(t)].lowDb + 12f) / 24f
+        t.startsWith("eqmid") -> (a.project.tracks[idx(t)].midDb + 12f) / 24f
+        t.startsWith("eqhigh") -> (a.project.tracks[idx(t)].highDb + 12f) / 24f
+        t.startsWith("eqfreq") -> (kotlin.math.ln(a.project.tracks[idx(t)].midHz / 200f) / kotlin.math.ln(25f))
+        t.startsWith("eqcut") -> a.project.tracks[idx(t)].lowCut / 300f
         else -> 0f
     }
 
@@ -144,6 +149,19 @@ class MidiControl(private val a: MainActivity, private val prefs: SharedPreferen
             t == "master" -> a.setMaster(v * 1.2f)
             t.startsWith("fader") -> a.project.tracks[idx(t)].gain = v * 1.2f
             t.startsWith("pan") -> a.project.tracks[idx(t)].pan = if (abs(v - 0.5f) < 0.02f) 0f else v * 2f - 1f
+            t.startsWith("eq") -> {
+                val tr = a.project.tracks[idx(t)]
+                val db = (v * 24f - 12f).let { if (abs(it) < 0.4f) 0f else (it * 2).roundToInt() / 2f }
+                when {
+                    t.startsWith("eqlow") -> tr.lowDb = db
+                    t.startsWith("eqmid") -> tr.midDb = db
+                    t.startsWith("eqhigh") -> tr.highDb = db
+                    t.startsWith("eqfreq") -> tr.midHz = (200f * Math.pow(25.0, v.toDouble()).toFloat()).roundToInt().coerceIn(200, 5000)
+                    t.startsWith("eqcut") -> tr.lowCut = if (v < 0.1f) 0 else (v * 300).roundToInt().coerceIn(40, 300)
+                }
+                tr.eqVer++
+                a.eqChanged(idx(t))
+            }
         }
     }
 

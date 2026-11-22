@@ -413,6 +413,8 @@ class Engine(var project: Project) {
     }
 
     /** n samples of the tracks from sample p into l / r (the track meters too when live); the click while playing */
+    private val tbufs = arrayOf(FloatArray(1024), FloatArray(1024))   // [0] playback, [1] export
+
     fun mix(p: Int, n: Int, l: FloatArray, r: FloatArray, live: Boolean) {
         java.util.Arrays.fill(l, 0f)
         java.util.Arrays.fill(r, 0f)
@@ -427,11 +429,18 @@ class Engine(var project: Project) {
             val g = t.gain
             val gl = g * (if (t.pan > 0) 1f - t.pan else 1f)
             val gr = g * (if (t.pan < 0) 1f + t.pan else 1f)
-            var pk = 0f
+            val si = if (live) 0 else 1
+            if (tbufs[si].size < n) tbufs[si] = FloatArray(n)
+            val b = tbufs[si]
             for (k in 0 until n) {
                 val q = p + k
-                if (q < 0 || q >= len) continue
-                val s = d.get(q) / 32768f
+                b[k] = if (q < 0 || q >= len) 0f else d.get(q) / 32768f
+            }
+            if (t.eq.ver != t.eqVer) t.eq.update(t, rate)
+            if (t.eq.active) t.eq.run(b, n, si)
+            var pk = 0f
+            for (k in 0 until n) {
+                val s = b[k]
                 l[k] += s * gl
                 r[k] += s * gr
                 val a = abs(s * g)
@@ -468,6 +477,7 @@ class Engine(var project: Project) {
         val r = FloatArray(n)
         val bb = ByteBuffer.allocate(n * 4).order(ByteOrder.LITTLE_ENDIAN)
         limGain = 1f
+        for (t in project.tracks) t.eq.reset(1)
         var p = 0
         while (p < total) {
             val m = minOf(n, total - p)

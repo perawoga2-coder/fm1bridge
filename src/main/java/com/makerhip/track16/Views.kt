@@ -227,3 +227,47 @@ class StereoMeter(ctx: Context) : View(ctx) {
         }
     }
 }
+
+/** The EQ's picture: its curve over 20 Hz .. 20 kHz, ±15 dB */
+class EqView(ctx: Context, private val color: Int) : View(ctx) {
+    private val d = resources.displayMetrics.density
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val path = android.graphics.Path()
+    var eq: TrackEq? = null
+    var rate = 48000
+    var on = true
+
+    override fun onDraw(c: Canvas) {
+        val w = width.toFloat(); val h = height.toFloat()
+        p.style = Paint.Style.FILL
+        p.color = C.PANEL2
+        c.drawRoundRect(RectF(0f, 0f, w, h), 10 * d, 10 * d, p)
+        p.color = C.LINE
+        p.strokeWidth = 1f
+        for (f in intArrayOf(100, 1000, 10000)) {
+            val x = (kotlin.math.log10(f / 20.0) / 3.0 * w).toFloat()
+            c.drawLine(x, 0f, x, h, p)
+        }
+        c.drawLine(0f, h / 2, w, h / 2, p)
+        p.color = C.DIM
+        p.textSize = 10 * d
+        c.drawText("100", (kotlin.math.log10(5.0) / 3.0 * w).toFloat() + 3 * d, h - 4 * d, p)
+        c.drawText("1k", (kotlin.math.log10(50.0) / 3.0 * w).toFloat() + 3 * d, h - 4 * d, p)
+        c.drawText("10k", (kotlin.math.log10(500.0) / 3.0 * w).toFloat() + 3 * d, h - 4 * d, p)
+        val e = eq ?: return
+        path.reset()
+        var x = 0f
+        while (x <= w) {
+            val f = 20.0 * Math.pow(1000.0, (x / w).toDouble())
+            val db = if (on) e.db(f, rate).coerceIn(-15.0, 15.0) else 0.0
+            val y = (h / 2 - db / 15.0 * (h / 2 - 6 * d)).toFloat()
+            if (x == 0f) path.moveTo(x, y) else path.lineTo(x, y)
+            x += 3 * d
+        }
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = 3 * d
+        p.color = if (on) color else C.DIM
+        c.drawPath(path, p)
+        p.style = Paint.Style.FILL
+    }
+}
