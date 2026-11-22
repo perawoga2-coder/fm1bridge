@@ -552,7 +552,10 @@ class MainActivity : Activity() {
         }
         thruBtn = btn("THRU", 13f) { midi.thruOn = !midi.thruOn; midi.saveFlags(); midiChanged() }
         midiText = text("", 12f, C.DIM)
-        r.addView(midiBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40)))
+        val back = btn("◀ BACK", 14f) { showMixer = false; refreshAll() }
+        lit(back, true, C.BLUE)
+        r.addView(back, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40)))
+        r.addView(midiBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40), 0f, dp(12)))
         r.addView(learnBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40), 0f, dp(6)))
         r.addView(clockBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40), 0f, dp(6)))
         r.addView(thruBtn, lp(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40), 0f, dp(6)))
