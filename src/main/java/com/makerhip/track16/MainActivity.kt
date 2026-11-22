@@ -954,24 +954,86 @@ class MainActivity : Activity() {
     private fun boxDialog(b: Inbox.Box) {
         Thread {
             val stems = Inbox.stems(this, b)
-            ui.post {
-                val list = stems.take(Project.N).joinToString("\n") { "${it.idx + 1}.  ${it.name}" } +
-                    if (stems.size > Project.N) "\n\n${stems.size - Project.N} more left out (16 tracks at most)" else ""
-                AlertDialog.Builder(this).setTitle(b.title)
-                    .setMessage("$list\n\nSPLIT puts each stem on its own track (name, fader, pan) and sets ${b.bpm} BPM.")
-                    .setPositiveButton("SPLIT → new song") { _, _ -> split(b, stems, true) }
-                    .setNeutralButton("SPLIT → this song") { _, _ ->
-                        AlertDialog.Builder(this).setTitle("Replace tracks 1-${minOf(stems.size, Project.N)} of ${project.title}?")
-                            .setMessage("Their audio is replaced by the stems.")
-                            .setPositiveButton("Replace") { _, _ -> split(b, stems, false) }
-                            .setNegativeButton("Cancel", null).show()
-                    }
-                    .setNegativeButton("Cancel", null).show()
-            }
+            ui.post { splitDialog(b, stems) }
         }.start()
     }
 
-    private fun split(b: Inbox.Box, stems: List<Inbox.Stem>, newSong: Boolean) {
+    /** SPLIT: a new song, or this song from track N (the first free one by default), at bar 1 or after the end (0.9) */
+    private fun splitDialog(b: Inbox.Box, stems: List<Inbox.Stem>) {
+        val used = (0 until Project.N).filter { project.tracks[it].length > 0 }
+        var newSong = used.isEmpty()
+        var from = (used.maxOrNull() ?: -1) + 1
+        if (from >= Project.N) from = 0
+        var after = false
+        val bar = engine.beatSamples() * 4
+        val endBar = (project.longest() + bar - 1) / maxOf(1, bar)          // bars already used
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.setPadding(dp(20), dp(8), dp(20), dp(8))
+        col.addView(text("${stems.size} stems · ${b.bars} bars · ${b.bpm} BPM", 13f, C.DIM))
+        val where = row()
+        val bNew = btn("New song", 14f) {}
+        val bThis = btn("This song", 14f) {}
+        where.addView(bNew, lp(0, dp(46), 1f))
+        where.addView(bThis, lp(0, dp(46), 1f, dp(6)))
+        col.addView(where, LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(10) })
+        val thisBox = LinearLayout(this)
+        thisBox.orientation = LinearLayout.VERTICAL
+        val fr = row()
+        fr.addView(text("From track", 14f, C.TEXT, true), lp(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val fv = text("", 18f, C.TEXT, true)
+        fr.addView(btn("−", 16f) {}.also { it.setOnClickListener { from = maxOf(0, from - 1); paintSplit(fv, thisBox, from, stems.size) } }, lp(dp(48), dp(44)))
+        fr.addView(fv.also { it.gravity = Gravity.CENTER }, lp(dp(52), LinearLayout.LayoutParams.WRAP_CONTENT))
+        fr.addView(btn("+", 16f) {}.also { it.setOnClickListener { from = minOf(Project.N - 1, from + 1); paintSplit(fv, thisBox, from, stems.size) } }, lp(dp(48), dp(44)))
+        thisBox.addView(fr, LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(12) })
+        val info = text("", 12f, C.DIM)
+        info.tag = "info"
+        thisBox.addView(info)
+        val when_ = row()
+        val bBar1 = btn("At bar 1 (together)", 13f) {}
+        val bAfter = btn("After the end (bar ${endBar + 1})", 13f) {}
+        when_.addView(bBar1, lp(0, dp(46), 1f))
+        when_.addView(bAfter, lp(0, dp(46), 1f, dp(6)))
+        thisBox.addView(when_, LinearLayout.LayoutParams(-1, -2).also { it.topMargin = dp(10) })
+        col.addView(thisBox)
+        fun paint() {
+            lit(bNew, newSong, C.PINK); lit(bThis, !newSong, C.PINK)
+            lit(bBar1, !after, C.BLUE); lit(bAfter, after, C.BLUE)
+            bAfter.isEnabled = endBar > 0
+            thisBox.visibility = if (newSong) View.GONE else View.VISIBLE
+            paintSplit(fv, thisBox, from, stems.size)
+        }
+        bNew.setOnClickListener { newSong = true; paint() }
+        bThis.setOnClickListener { newSong = false; paint() }
+        bBar1.setOnClickListener { after = false; paint() }
+        bAfter.setOnClickListener { after = true; paint() }
+        paint()
+        val sv = android.widget.ScrollView(this)
+        sv.addView(col)
+        AlertDialog.Builder(this).setTitle(b.title).setView(sv)
+            .setPositiveButton("SPLIT") { _, _ ->
+                if (newSong) { split(b, stems, true, 0, 0); return@setPositiveButton }
+                val at = if (after) endBar * bar else 0
+                val n = minOf(stems.size, Project.N - from)
+                val busyTracks = (from until from + n).filter { project.tracks[it].length > 0 }
+                if (busyTracks.isEmpty() || after) split(b, stems, false, from, at)
+                else AlertDialog.Builder(this).setTitle("Tracks ${busyTracks.joinToString { "${it + 1}" }} have audio")
+                    .setMessage("The stems replace it there (from bar 1).")
+                    .setPositiveButton("Replace") { _, _ -> split(b, stems, false, from, at) }
+                    .setNegativeButton("Cancel", null).show()
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun paintSplit(fv: TextView, box: LinearLayout, from: Int, n: Int) {
+        fv.text = "${from + 1}"
+        val last = minOf(Project.N, from + n)
+        val left = n - (last - from)
+        box.findViewWithTag<TextView>("info")?.text = "Tracks ${from + 1}–$last" +
+            (if (left > 0) " · $left stem${if (left > 1) "s" else ""} left out (16 tracks)" else "")
+    }
+
+    private fun split(b: Inbox.Box, stems: List<Inbox.Stem>, newSong: Boolean, from: Int, at: Int) {
         if (busy || engine.playing) { toast("Stop first"); return }
         if (newSong) {
             val base = b.title.replace(Regex("[^\\p{L}\\p{N} ._-]"), "_").take(36).trim().ifBlank { "Inbox song" }
@@ -985,24 +1047,33 @@ class MainActivity : Activity() {
         val p = project
         Thread {
             var done = 0
-            for ((i, st) in stems.take(Project.N).withIndex()) {
+            val n = minOf(stems.size, Project.N - from)
+            for (j in 0 until n) {
+                val st = stems[j]
+                val i = from + j
                 val a = Inbox.audio(this, b, st, p.rate) ?: continue
-                p.clear(i)
-                p.write(i, 0, a, a.size)
+                if (at == 0) p.clear(i)
+                p.write(i, at, a, a.size)
                 val t = p.tracks[i]
-                t.name = st.name.ifBlank { "Track ${i + 1}" }
+                if (at == 0 || t.name.startsWith("Track ")) t.name = st.name.ifBlank { "Track ${i + 1}" }
                 t.gain = st.gain.coerceIn(0f, 1.2f)
                 t.pan = st.pan.coerceIn(-1f, 1f)
                 t.mute = false; t.solo = false
                 done++
             }
-            if (b.bpm in 30..300) p.bpm = b.bpm
-            if (b.bars > 0) { p.loopFrom = 1; p.loopTo = b.bars; p.loopOn = true }   // (0.8: listen to it round and round)
+            if (b.bpm in 30..300 && (newSong || p.longest() == 0 || at == 0 && from == 0)) p.bpm = b.bpm
+            if (b.bars > 0) {                                    // (0.8: listen to it round and round)
+                val bar = engine.beatSamples() * 4
+                p.loopFrom = at / maxOf(1, bar) + 1
+                p.loopTo = p.loopFrom + b.bars - 1
+                p.loopOn = true
+            }
             p.save()
             ui.post {
                 busy = false
+                selected = from
                 refreshAll()
-                AlertDialog.Builder(this).setTitle("Split: $done of ${stems.size} stems")
+                AlertDialog.Builder(this).setTitle("Split: $done of ${stems.size} stems" + if (!newSong) " (tracks ${from + 1}–${from + done})" else "")
                     .setMessage("Remove \"${b.title}\" from the inbox?")
                     .setPositiveButton("Remove") { _, _ -> Thread { Inbox.delete(this, b); ui.post { checkInbox() } }.start() }
                     .setNegativeButton("Keep it") { _, _ -> checkInbox() }.show()
