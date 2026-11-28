@@ -1,0 +1,23 @@
+name: Key check
+
+# The Maker Hip release key in this repository's Secrets: is it there, whole, and which key is it? Prints only
+# the certificate's SHA-256 fingerprint (public; it is what the Android Developer Console asks for), never the key.
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: The key's fingerprint
+        env:
+          RELEASE_KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
+          RELEASE_KEYSTORE_B64_2: ${{ secrets.RELEASE_KEYSTORE_B64_2 }}
+          RELEASE_KEYSTORE_B64_3: ${{ secrets.RELEASE_KEYSTORE_B64_3 }}
+          RELEASE_PASSWORD: ${{ secrets.RELEASE_PASSWORD }}
+        run: |
+          if [ -z "$RELEASE_KEYSTORE_B64" ]; then echo "KEY: MISSING (no RELEASE_KEYSTORE_B64 secret)"; exit 1; fi
+          if [ -z "$RELEASE_PASSWORD" ]; then echo "KEY: MISSING (no RELEASE_PASSWORD secret)"; exit 1; fi
+          printf '%s%s%s' "$RELEASE_KEYSTORE_B64" "$RELEASE_KEYSTORE_B64_2" "$RELEASE_KEYSTORE_B64_3" | tr -d ' \t\r\n' | base64 -d > k.jks || { echo "KEY: NOT WHOLE (the text does not decode)"; exit 1; }
+          keytool -list -v -keystore k.jks -storepass "$RELEASE_PASSWORD" -alias makerhip 2>/dev/null | grep -E "^\s*(Alias name|SHA256):" || { echo "KEY: WRONG PASSWORD OR ALIAS"; exit 1; }
+          rm -f k.jks
