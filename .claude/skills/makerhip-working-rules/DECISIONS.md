@@ -21,7 +21,7 @@
   - SAVE เก็บ 4 หน้า + LENGTH + PLAY MODE; เพลงเก่าโหลดเป็น 1 หน้า; Vacuum dump แทร็กละ 192 ไบต์ (หน้า 2–4 ต่อท้าย, h[14] = จำนวนหน้า, h[15] = PLAY MODE) Burger เก่ายังอ่านหน้า 1 ได้; Burger 3.64 อ่านครบ 4 หน้า
 
 ## Burger Studio Lab (repo fm1burger)
-- สาย Lab กุญแจเดิม (SHA256 B7:C6:…:3D:B6) เลขรุ่นใหม่ทุกครั้ง; เว็บ Maker Hip ปุ่มดาวน์โหลดยังเป็น 3.55 จนเจ้าของลองรุ่นใหม่
+- สาย Lab กุญแจเดิม (SHA256 B7:C6:…:3D:B6) เลขรุ่นใหม่ทุกครั้ง; เว็บ Maker Hip ปุ่มดาวน์โหลด = Burger 3.67 + 16 Track 0.12 (28 พ.ย., เจ้าของเลือก; apps.json + index.html + download/)
 - Vacuum: Clear everything / Lanes 1–8 only + Direct Split (เลือกบาร์); รองรับลูปหลายบาร์และลูปที่แทร็ก 7; ลบช่อง MY ได้ (3.60)
 - มี limiter ที่ master ตั้งแต่ 3.59
 - 3.65 (28 พ.ย.): ปุ่ม Backup everything / Restore ในหน้า Setup; เจ้าของลง 3.65 และสำรองแล้ว
