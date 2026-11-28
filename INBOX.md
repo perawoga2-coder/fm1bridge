@@ -7,22 +7,23 @@ into its tracks. 16 Track does not need to be open when a box is sent.
 
 A `ContentProvider` in Burger Studio:
 
-- **Authority:** `com.makerhip.burger.inbox`
-- **Permission:** read and write are both protected by `com.makerhip.permission.INBOX`, with
+- **Since 16 Track 0.12 and Burger Studio 3.66** (the Maker Hip release key; new names so the pair installs beside the old pair: `com.makerhip.burger.inbox`, `com.makerhip.permission.INBOX`, `com.makerhip.track16` before).
+- **Authority:** `com.makerhip.burgerstudio.inbox`
+- **Permission:** read and write are both protected by `com.makerhip.studio.permission.INBOX`, with
   `protectionLevel="signature"`. Both apps declare it and use it. They are signed with the same Maker Hip key,
   so no prompt is shown to the user and no other app can read the boxes.
-- **Visibility:** 16 Track declares `<queries><provider android:authorities="com.makerhip.burger.inbox"/></queries>`.
-  Burger Studio shows its "→ MIX" button only when the package `com.makerhip.track16` is installed (it
-  declares `<queries><package android:name="com.makerhip.track16"/></queries>`).
+- **Visibility:** 16 Track declares `<queries><provider android:authorities="com.makerhip.burgerstudio.inbox"/></queries>`.
+  Burger Studio shows its "→ MIX" button only when the package `com.makerhip.track16.studio` is installed (it
+  declares `<queries><package android:name="com.makerhip.track16.studio"/></queries>`).
 
 ## URIs
 
 | URI | Operation | Result |
 |---|---|---|
-| `content://com.makerhip.burger.inbox/boxes` | query | one row per box, newest first |
-| `content://com.makerhip.burger.inbox/boxes/<id>/tracks` | query | one row per track, in order |
-| `content://com.makerhip.burger.inbox/boxes/<id>/tracks/<idx>` | openFile "r" | the track's WAV |
-| `content://com.makerhip.burger.inbox/boxes/<id>` | delete | removes the box (16 Track asks the user first) |
+| `content://com.makerhip.burgerstudio.inbox/boxes` | query | one row per box, newest first |
+| `content://com.makerhip.burgerstudio.inbox/boxes/<id>/tracks` | query | one row per track, in order |
+| `content://com.makerhip.burgerstudio.inbox/boxes/<id>/tracks/<idx>` | openFile "r" | the track's WAV |
+| `content://com.makerhip.burgerstudio.inbox/boxes/<id>` | delete | removes the box (16 Track asks the user first) |
 
 ### Box columns
 

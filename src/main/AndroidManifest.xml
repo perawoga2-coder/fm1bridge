@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- the Maker Hip INBOX (INBOX.md): Burger Studio's boxes of stems, readable only by apps with the Maker Hip key -->
-    <permission android:name="com.makerhip.permission.INBOX" android:protectionLevel="signature" />
-    <uses-permission android:name="com.makerhip.permission.INBOX" />
+    <!-- the Maker Hip INBOX (INBOX.md): Burger Studio's boxes of stems, readable only by apps with the Maker Hip key.
+         0.12: the Maker Hip release key; new names for the permission and the authority (Burger Studio 3.66's), so this
+         pair installs beside the pair of before -->
+    <permission android:name="com.makerhip.studio.permission.INBOX" android:protectionLevel="signature" />
+    <uses-permission android:name="com.makerhip.studio.permission.INBOX" />
     <queries>
-        <provider android:authorities="com.makerhip.burger.inbox" />
+        <provider android:authorities="com.makerhip.burgerstudio.inbox" />
     </queries>
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />

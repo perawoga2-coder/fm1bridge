@@ -5,7 +5,7 @@ import android.net.Uri
 
 /** The Maker Hip INBOX (INBOX.md): boxes of stems that Burger Studio keeps for 16 Track to SPLIT into its tracks. */
 object Inbox {
-    const val AUTH = "com.makerhip.burger.inbox"
+    const val AUTH = "com.makerhip.burgerstudio.inbox"   // (0.12, Burger Studio 3.66; com.makerhip.burger.inbox before)
     private val BOXES: Uri = Uri.parse("content://$AUTH/boxes")
 
     class Box(val id: String, val title: String, val kind: String, val bpm: Int, val bars: Int, val meter: String,

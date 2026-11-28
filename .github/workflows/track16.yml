@@ -23,17 +23,30 @@ jobs:
         with:
           gradle-version: 8.7
 
-      - name: The Maker Hip signing key
+      # 0.12: the Maker Hip release key, from this repository's Secrets (never in the repository). No key: no build.
+      # The old fixed debug key is no longer here.
+      - name: The Maker Hip release key
         env:
-          KEYSTORE_B64: "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"
-        run: echo "$KEYSTORE_B64" | base64 -d > debug.keystore
+          RELEASE_KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
+          RELEASE_KEYSTORE_B64_2: ${{ secrets.RELEASE_KEYSTORE_B64_2 }}
+          RELEASE_KEYSTORE_B64_3: ${{ secrets.RELEASE_KEYSTORE_B64_3 }}
+        run: |
+          if [ -z "$RELEASE_KEYSTORE_B64" ]; then echo "The Maker Hip key is not in Secrets: stop"; exit 1; fi
+          printf '%s%s%s' "$RELEASE_KEYSTORE_B64" "$RELEASE_KEYSTORE_B64_2" "$RELEASE_KEYSTORE_B64_3" | tr -d ' \t\r\n' | base64 -d > release.jks
 
       - name: Read the app version
         id: ver
         run: echo "name=$(grep -oP 'versionName = "\K[^"]+' build.gradle.kts)" >> "$GITHUB_OUTPUT"
 
       - name: Build debug APK
-        run: gradle assembleDebug --stacktrace
+        env:
+          RELEASE_PASSWORD: ${{ secrets.RELEASE_PASSWORD }}
+        run: |
+          gradle assembleDebug --stacktrace
+          # (signed with the Maker Hip key, or no APK)
+          SIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$SIGNER" verify --print-certs build/outputs/apk/debug/*.apk | tr 'A-F' 'a-f' | grep -q "sha-256 digest: f3d4074b5e5a731072b992434b0985f8c376dbf4b76fa75eb6445fbeafea4490" || \
+            { echo "The APK is not signed with the Maker Hip key: stop"; exit 1; }
 
       - name: Keep APK as a build artifact
         uses: actions/upload-artifact@v4

@@ -8,27 +8,35 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.makerhip.track16"      // 16 Track Mixer Recorder, a Maker Hip app
+        // 0.12: the Maker Hip release key and a new name (registered with Google's developer verification); it installs
+        // beside 16 Track of before (com.makerhip.track16, the old key), whose work comes over by RESTORE
+        applicationId = "com.makerhip.track16.studio"   // 16 Track Mixer Recorder, a Maker Hip app
         minSdk = 26
         targetSdk = 34
-        versionCode = 11
-        versionName = "0.11"
+        versionCode = 12
+        versionName = "0.12"
     }
 
-    // the Maker Hip key (the same as Burger Studio's): a new APK installs over the old one, and the apps can share later
-    val fixedKey = file("debug.keystore")
-    if (fixedKey.exists()) {
+    // 0.12: the Maker Hip release key (the same as Burger Studio's, so the INBOX works between them). CI writes
+    // release.jks from the RELEASE_KEYSTORE_B64 secret and passes its password in RELEASE_PASSWORD; the key itself is
+    // never in the repository. (Up to 0.11: a fixed debug key, written out in the workflow)
+    val relKey = file("release.jks")
+    val relPw = System.getenv("RELEASE_PASSWORD")
+    if (relKey.exists() && !relPw.isNullOrEmpty()) {
         signingConfigs {
-            create("fixedDebug") {
-                storeFile = fixedKey
-                storePassword = "android"
-                keyAlias = "androiddebugkey"
-                keyPassword = "android"
+            create("makerhip") {
+                storeFile = relKey
+                storePassword = relPw
+                keyAlias = "makerhip"
+                keyPassword = relPw
             }
         }
         buildTypes {
             getByName("debug") {
-                signingConfig = signingConfigs.getByName("fixedDebug")
+                signingConfig = signingConfigs.getByName("makerhip")
+            }
+            getByName("release") {
+                signingConfig = signingConfigs.getByName("makerhip")
             }
         }
     }
