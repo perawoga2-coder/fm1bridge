@@ -45,7 +45,8 @@ jobs:
           gradle assembleDebug --stacktrace
           # (signed with the Maker Hip key, or no APK)
           SIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
-          "$SIGNER" verify --print-certs build/outputs/apk/debug/*.apk | tr 'A-F' 'a-f' | grep -q "sha-256 digest: f3d4074b5e5a731072b992434b0985f8c376dbf4b76fa75eb6445fbeafea4490" || \
+          "$SIGNER" verify --print-certs build/outputs/apk/debug/*.apk | grep -i "SHA-256 digest"
+          "$SIGNER" verify --print-certs build/outputs/apk/debug/*.apk | grep -qi "SHA-256 digest: f3d4074b5e5a731072b992434b0985f8c376dbf4b76fa75eb6445fbeafea4490" || \
             { echo "The APK is not signed with the Maker Hip key: stop"; exit 1; }
 
       - name: Keep APK as a build artifact
