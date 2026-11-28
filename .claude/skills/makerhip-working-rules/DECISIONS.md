@@ -27,6 +27,7 @@
 - 3.65 (28 พ.ย.): ปุ่ม Backup everything / Restore ในหน้า Setup; เจ้าของลง 3.65 และสำรองแล้ว
 - กุญแจ + ชื่อแอป (28 พ.ย., เจ้าของเลือก ก = ย้ายทั้งคู่): Burger 3.66 = com.makerhip.burgerstudio.lab, 16 Track 0.12 = com.makerhip.track16.studio, เซ็นด้วยกุญแจ Maker Hip จาก Secrets ทั้ง 2 repo (SHA-256 F3:D4:07:4B:…:EA:44:90); INBOX ชื่อใหม่ com.makerhip.burgerstudio.inbox / com.makerhip.studio.permission.INBOX; ลงข้างชุดเก่าได้ ย้ายข้อมูลด้วย Backup (Burger 3.65 / 16 Track 0.11) → Restore; กุญแจเก่า (B7:C6, เปิดเผย) ออกจาก build สาขา ccr แล้ว (สาขา main ของ fm1bridge ยังมี รอเจ้าของอนุญาต); ไฟล์กุญแจ Maker Hip ชุดเดิมเคยส่งให้เจ้าของ 23–24 พ.ย. เจ้าของไม่มีสำเนาแล้ว → Secrets คือที่เก็บเดียว
 - Android Developer Console (28 พ.ย.): บัญชี "Nume" แบบ Full (จ่ายแล้ว) ยืนยันตัวตน + เบอร์ผ่าน; ลงทะเบียน 2 ชื่อแพ็กเกจข้างบนแล้ว (อยู่ระหว่างตรวจสอบ) — ข้อมูลส่วนตัวกรอกบนหน้า Google เท่านั้น ห้ามรับ OTP/เอกสาร
+- Google Play (28 พ.ย.): ส่ง Burger ก่อน ชื่อร้าน "Burger Studio" ฟรี ไม่เก็บเงิน; 3.67 = target API 36 + ไฟล์ .aab; หน้า privacy ที่ makerhip/privacy/; ร่างหน้าร้าน docs/play/STORE_LISTING.md (repo fm1burger); เจ้าของให้รอส่ง Play กลางเดือน ธ.ค. (ยังไม่ได้สมัคร Play Console; ต้องมีคนทดสอบ 12 คน 14 วัน) — ตอนนี้แค่ให้ทุกคนลงจาก APK ได้
 - รอ (27 พ.ย.): Burger อิมูเลเตอร์บนเว็บ/ใน Hub — เจ้าของให้รอหลังอัปเกรดฟีเจอร์ Burger ตอนอัปเดตโทเค็นแล้ว (ตัวเลือกที่เสนอ: ก ลิงก์ในการ์ด, ข แผงแนะนำในหน้า emu, ค พอร์ต Burger ขึ้นเว็บจริง); การ์ด Hub ยังเขียน "16-step" ต้องแก้ตอน release 4.16
 
 ## วิธีทำงาน
