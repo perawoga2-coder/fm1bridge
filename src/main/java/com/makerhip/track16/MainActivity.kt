@@ -35,6 +35,11 @@ import java.io.OutputStream
 import java.util.Locale
 
 class MainActivity : Activity() {
+
+    companion object {
+        const val REQ_BACKUP = 21               // 0.11: BACKUP EVERYTHING: where the zip goes
+        const val REQ_RESTORE = 22              // and RESTORE: the zip to read
+    }
     lateinit var project: Project
     lateinit var engine: Engine
     var selected = 0
@@ -130,9 +135,11 @@ class MainActivity : Activity() {
         checkInbox()
     }
 
+    private var restored = false               // 0.11: a restore put its files in: nothing of now may be saved over them
+
     override fun onPause() {
         super.onPause()
-        project.save()
+        if (!restored) project.save()
     }
 
     override fun onDestroy() {
@@ -1142,7 +1149,8 @@ class MainActivity : Activity() {
     }
 
     private fun menu() {
-        val items = arrayOf("New song", "Open a song", "Rename this song", "Export: mix and stems (WAV)", "Settings: input and latency", "About")
+        val items = arrayOf("New song", "Open a song", "Rename this song", "Export: mix and stems (WAV)", "Settings: input and latency", "About",
+            "Backup everything", "Restore a backup…")
         AlertDialog.Builder(this).setTitle(project.title).setItems(items) { _, w ->
             when (w) {
                 0 -> switchTo(newProjectName())
@@ -1155,8 +1163,80 @@ class MainActivity : Activity() {
                         "Record up to 16 tracks one at a time over each other, mix them, and export the mix and the stems as WAV.\n\n" +
                         "INBOX: with Burger Studio installed, its → MIX boxes (a Q or a whole song, one stem per track) wait here; SPLIT puts them on the tracks.")
                     .setPositiveButton("OK", null).show()
+                6 -> backupAll()
+                7 -> restoreAll()
             }
         }.show()
+    }
+
+    // ---------------- 0.11: BACKUP EVERYTHING / RESTORE (Backup.kt) ----------------
+
+    private val prefsDir get() = File(applicationInfo.dataDir, "shared_prefs")
+
+    private fun backupAll() {
+        if (engine.playing) engine.stop()
+        project.save()                            // (what is in the app now, on disk first)
+        val i = Intent(Intent.ACTION_CREATE_DOCUMENT)
+        i.addCategory(Intent.CATEGORY_OPENABLE)
+        i.type = "application/zip"
+        i.putExtra(Intent.EXTRA_TITLE, "16Track-backup-" +
+            java.text.SimpleDateFormat("yyyy-MM-dd-HHmm", Locale.US).format(java.util.Date()) + ".zip")
+        startActivityForResult(i, REQ_BACKUP)
+    }
+
+    private fun restoreAll() {
+        AlertDialog.Builder(this).setTitle("Restore a backup")
+            .setMessage("Everything in the app now (songs, tracks, settings) is replaced by the backup. " +
+                "Make a backup of now first if you may want it. The app closes when it is done: open it again.")
+            .setPositiveButton("Choose the backup…") { _, _ ->
+                val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                i.addCategory(Intent.CATEGORY_OPENABLE)
+                i.type = "*/*"                    // (some file pickers do not mark a .zip as application/zip)
+                startActivityForResult(i, REQ_RESTORE)
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun backupTo(uri: Uri) {
+        busy = true
+        toast("Backing up…")
+        Thread {
+            val r = try {
+                val ver = packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+                contentResolver.openOutputStream(uri)?.use { Backup.write(filesDir, prefsDir, it, ver) }
+            } catch (e: Exception) { null }
+            ui.post {
+                busy = false
+                if (r == null) toast("Backup failed")
+                else AlertDialog.Builder(this).setTitle("Backup saved")
+                    .setMessage("${r.files} files, ${r.bytes / (1024 * 1024)} MB.\n\nKeep it somewhere safe (Download, Google Drive).")
+                    .setPositiveButton("OK", null).show()
+            }
+        }.start()
+    }
+
+    private fun restoreFrom(uri: Uri) {
+        if (engine.playing) engine.stop()
+        busy = true
+        toast("Restoring…")
+        Thread {
+            var err: String? = null
+            val r = try {
+                contentResolver.openInputStream(uri)?.use { Backup.restore(filesDir, prefsDir, it) }
+            } catch (e: Exception) { err = e.message; null }
+            if (r != null) restored = true
+            ui.post {
+                busy = false
+                if (r == null) toast("Not restored (the app is as it was): ${err ?: "cannot read it"}")
+                else AlertDialog.Builder(this).setTitle("Restored")
+                    .setMessage("${r.files} files are back. The app closes now: open it again.")
+                    .setCancelable(false)
+                    .setPositiveButton("Close the app") { _, _ ->
+                        finishAffinity()
+                        android.os.Process.killProcess(android.os.Process.myPid())
+                    }.show()
+            }
+        }.start()
     }
 
     private fun projectsDialog() {
@@ -1436,7 +1516,10 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         val uri: Uri = data?.data ?: return
-        if (requestCode != 7 || resultCode != RESULT_OK) return
+        if (resultCode != RESULT_OK) return
+        if (requestCode == REQ_BACKUP) { backupTo(uri); return }
+        if (requestCode == REQ_RESTORE) { restoreFrom(uri); return }
+        if (requestCode != 7) return
         val at = engine.pos
         val tr = selected
         busy = true
