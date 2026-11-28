@@ -4,6 +4,8 @@ name: Key check
 # the certificate's SHA-256 fingerprint (public; it is what the Android Developer Console asks for), never the key.
 on:
   workflow_dispatch:
+  push:                      # (a new workflow can be started by hand only from the default branch: it runs when it changes)
+    paths: [.github/workflows/key-check.yml]
 
 jobs:
   check:
